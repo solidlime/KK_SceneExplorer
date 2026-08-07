@@ -1,0 +1,55 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework Condition="'$(Game)' == 'KKS'">net46</TargetFramework>
+    <TargetFramework Condition="'$(Game)' != 'KKS'">net35</TargetFramework>
+    <LangVersion>7.3</LangVersion>
+    <AssemblyName>KK_SceneExplorer</AssemblyName>
+    <RootNamespace>KK_SceneExplorer</RootNamespace>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <NoWarn>NETSDK1138</NoWarn>
+  </PropertyGroup>
+
+  <!-- ゲーム本体参照（KK / KKS 切り替え） -->
+  <ItemGroup Condition="'$(Game)' != 'KKS'">
+    <Reference Include="Assembly-CSharp">
+      <HintPath>..\..\Koikatu_Data\Managed\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>..\..\Koikatu_Data\Managed\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(Game)' == 'KKS'">
+    <Reference Include="Assembly-CSharp">
+      <HintPath>..\..\KoikatsuSunshine_Data\Managed\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>..\..\KoikatsuSunshine_Data\Managed\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- BepInEx 共通参照 -->
+  <ItemGroup>
+    <Reference Include="BepInEx">
+      <HintPath>..\..\BepInEx\core\BepInEx.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>..\..\BepInEx\core\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- net35（KK）用リファレンスアセンブリ -->
+  <ItemGroup Condition="'$(Game)' != 'KKS'">
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net35" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+</Project>

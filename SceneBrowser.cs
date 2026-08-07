@@ -1,0 +1,1535 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.IO;
+using System.Reflection;
+using Manager;
+using UnityEngine;
+
+#pragma warning disable CS0414 // フィールド割当済みだが未使用
+
+namespace KK_SceneExplorer
+{
+    /// <summary>
+    /// 統合シーンブラウザ: 左ペインにフォルダツリー、右ペインにシーン一覧グリッド。
+    /// SceneTree.cs の BF風描画流儀を踏襲。
+    /// v2.2.0: スクロール式グリッド / ツールチップ位置修正 / フォント連動 / ウィンドウリサイズ＋記憶
+    /// </summary>
+    public class SceneBrowser : MonoBehaviour
+    {
+        // ── 定数 ──
+        private const int WindowId = 981238;
+        private const float CheckInterval = 0.3f;
+        private const int IndentPerLevel = 12;
+        private const int ToggleWidth = 18;
+        private const int TreeLineWidth = 14;
+        // v2.5.1: キャッシュ上限を引き上げ（50→300）。追い出されたアイテムは ThumbLoaded を
+        // リセットして再読み込み可能にする（AddToThumbnailCache の追い出し処理と対）
+        private const int MaxCacheSize = 300;
+        private const float DeleteResetSeconds = 5f;
+        private const float ItemPadX = 6f;
+        private const float ItemPadY = 6f;
+        private const float ItemGap = 4f;
+        private const float ItemSpacing = 8f;
+        private const float DateSize = 11f;
+        private const float FilenameHeight = 18f;
+        private const float ResizeHandleSize = 14f;
+        private const float TooltipOffsetX = 16f;
+        private const float TooltipOffsetY = 16f;
+        private const float TooltipPad = 8f;
+        private const float MinWindowWidth = 800f;
+        private const float MinWindowHeight = 500f;
+
+        // ── 動的レイアウト（フォントサイズ連動） ──
+        // v2.5.3: TitleBarHeight 追加。ヘッダー/フッターの見切れ対策で
+        // TextLineHeight（フォント実行高さ）を基準に統一。
+        private float TitleBarHeight { get { return TextLineHeight + 8f; } }
+        private float ToolbarHeight { get { return TextLineHeight + 8f; } }
+        private float BottomBarHeight { get { return TextLineHeight + 8f; } }
+        private float SliderWidth { get { return Mathf.Max(100f, FontSizeVal * 7f); } }
+        private float ButtonHeight { get { return TextLineHeight + 6f; } }
+        private float TabButtonWidth { get { return Mathf.Max(72f, FontSizeVal * 5f); } }
+        // v2.5.4: ボタン幅をTextLineHeight基準に変更（旧:固定乗算式）。フッター溢れ対策。
+        private float SortButtonWidth { get { return TextLineHeight * 3f; } }
+        private float ArrowButtonWidth { get { return TextLineHeight * 1.8f; } }
+        private float PageNavButtonWidth { get { return Mathf.Max(28f, FontSizeVal * 2f); } }
+        // v2.5.4: フッターボタン幅をFlexibleWidth化。固定幅プロパティ削除。
+        private float FooterButtonWidth { get { return TextLineHeight * 3f; } }
+        private float FontSizeVal { get { return (float)SceneExplorerPlugin.FontSize.Value; } }
+        private float RowHeight { get { return Mathf.Max(16f, FontSizeVal + 2f); } }
+        // v2.5.2: 日本語フォントの実際の行高（ascender+descender+leading）は
+        // fontSize の約1.4倍。クリップ防止のためテキスト行の高さにこの係数を適用。
+        private float TextLineHeight { get { return Mathf.Ceil(FontSizeVal * 1.4f); } }
+
+        // ── 静的テクスチャ（Awakeで生成。GUI.skinには触らない）──
+        private static Texture2D _selectedRowTex;
+        private static Texture2D _hoverRowTex;
+        private static Texture2D _splitterTex;
+        private static Texture2D _selectedItemTex;
+        private static Texture2D _hoverItemTex;
+        private static Texture2D _emptyThumbTex;
+        private static Texture2D _tooltipBgTex;
+        private static Texture2D _resizeHandleTex;
+        private static Texture2D _titleBarTex;
+        private static Texture2D _windowBgTex;
+        private static Texture2D _clearTex;
+
+        // ── v2.0.6 GUIClipリーク対策 ──
+        private static Type _clipType;
+        private static PropertyInfo _clipVisibleRect;
+        private static MethodInfo _clipPop;
+        private static bool _clipWarned;
+
+        // ── インスタンス状態 ──
+        private Rect _windowRect;
+        private bool _visible;
+        private bool _loading;
+        private float _nextCheckTime;
+        private bool _stylesReady;
+
+        // ファイル一覧
+        private List<SceneItem> _items = new List<SceneItem>();
+        private int _selectedIndex = -1;
+        private string _lastScannedFolder;
+
+        // UI状態
+        private Vector2 _treeScroll;
+        private Vector2 _gridScroll;
+        private float _splitPos = 240f;
+        private bool _draggingSplitter;
+        private float _thumbSize = 96f;
+        private int _hoverItemIndex = -1;
+        private string _tooltipText = "";
+        private Rect _tooltipRect;
+        private SortMode _sortMode = SortMode.Date;
+        private bool _sortDescending = true;
+
+        // ウィンドウリサイズ
+        private bool _draggingResize;
+        private Vector2 _resizeStartPos;
+        private Rect _resizeStartRect;
+        private float _lastSavedWidth;
+        private float _lastSavedHeight;
+        private float _saveDebounceTime;
+
+        // デリート二段階確認
+        private bool _deleteConfirm;
+        private float _deleteConfirmTime;
+
+        // ツリー状態
+        private HashSet<string> _expandedFolders = new HashSet<string>();
+        private string _treeFilter = "";
+        private Dictionary<string, List<DirEntry>> _dirChildrenCache = new Dictionary<string, List<DirEntry>>();
+
+        // サムネイルキャッシュ
+        private Dictionary<string, Texture2D> _thumbCache = new Dictionary<string, Texture2D>();
+        private List<string> _thumbCacheOrder = new List<string>();
+
+        // GUIStyle（OnGUI初回に生成）
+        private GUIStyle _nodeButtonStyle;
+        private GUIStyle _filterStyle;
+        private GUIStyle _selectedItemStyle;
+        private GUIStyle _dateStyle;
+        private GUIStyle _toolbarButtonStyle;
+        private GUIStyle _pageLabelStyle;
+        private GUIStyle _tooltipStyle;
+        private GUIStyle _splitterStyle;
+        private GUIStyle _countLabelStyle;
+        private GUIStyle _titleBarStyle;
+
+        private enum SortMode
+        {
+            Name,
+            Date,
+            Size
+        }
+
+
+        private class SceneItem
+        {
+            public string FilePath;
+            public string FileName;
+            public DateTime LastWriteTime;
+            public long FileSize;
+            public Texture2D Thumbnail;
+            public bool ThumbLoaded;
+        }
+
+        private class DirEntry
+        {
+            public string Name;
+            public string FullPath;
+            public bool HasChildren;
+        }
+
+        // ═══════════════════════════════════════════════════════
+        // MonoBehaviour
+        // ═══════════════════════════════════════════════════════
+
+        private void Awake()
+        {
+            // テクスチャ生成（GUI.skinには触らない — SceneTree.csと同じ方式）
+            _selectedRowTex = new Texture2D(1, 1);
+            _selectedRowTex.SetPixel(0, 0, new Color(0.24f, 0.48f, 0.90f, 0.65f));
+            _selectedRowTex.Apply();
+
+            _hoverRowTex = new Texture2D(1, 1);
+            _hoverRowTex.SetPixel(0, 0, new Color(0.5f, 0.7f, 1.0f, 0.3f));
+            _hoverRowTex.Apply();
+
+            _splitterTex = new Texture2D(1, 1);
+            _splitterTex.SetPixel(0, 0, new Color(0.35f, 0.35f, 0.35f, 1f));
+            _splitterTex.Apply();
+
+            _selectedItemTex = new Texture2D(1, 1);
+            _selectedItemTex.SetPixel(0, 0, new Color(0.24f, 0.48f, 0.90f, 0.4f));
+            _selectedItemTex.Apply();
+
+            _hoverItemTex = new Texture2D(1, 1);
+            _hoverItemTex.SetPixel(0, 0, new Color(0.5f, 0.7f, 1.0f, 0.2f));
+            _hoverItemTex.Apply();
+
+            _emptyThumbTex = new Texture2D(1, 1);
+            _emptyThumbTex.SetPixel(0, 0, new Color(0.15f, 0.15f, 0.15f, 1f));
+            _emptyThumbTex.Apply();
+
+            _tooltipBgTex = new Texture2D(1, 1);
+            _tooltipBgTex.SetPixel(0, 0, new Color(0.1f, 0.1f, 0.1f, 0.95f));
+            _tooltipBgTex.Apply();
+
+            _resizeHandleTex = new Texture2D(1, 1);
+            _resizeHandleTex.SetPixel(0, 0, new Color(0.45f, 0.45f, 0.45f, 0.8f));
+            _resizeHandleTex.Apply();
+
+            // v2.5.3: カスタムタイトルバー背景（Unity標準タイトルバーの代わりに描画）
+            _titleBarTex = new Texture2D(1, 1);
+            _titleBarTex.SetPixel(0, 0, new Color(0.16f, 0.16f, 0.16f, 1f));
+            _titleBarTex.Apply();
+
+            // v2.6.0: ウィンドウ背景（ほぼ不透明。背後がうっすら見える程度）
+            _windowBgTex = new Texture2D(1, 1);
+            _windowBgTex.SetPixel(0, 0, new Color(0.11f, 0.11f, 0.11f, 0.96f));
+            _windowBgTex.Apply();
+
+            // v2.6.0: モーダル用透明テクスチャ（クリック吸収レイヤーに使用）
+            _clearTex = new Texture2D(1, 1);
+            _clearTex.SetPixel(0, 0, new Color(0, 0, 0, 0));
+            _clearTex.Apply();
+
+            // 保存済みウィンドウサイズを読み込み
+            _lastSavedWidth = (float)SceneExplorerPlugin.BrowserWidth.Value;
+            _lastSavedHeight = (float)SceneExplorerPlugin.BrowserHeight.Value;
+        }
+
+        private void Update()
+        {
+            if (_loading) return;
+            if (Time.time < _nextCheckTime) return;
+            _nextCheckTime = Time.time + CheckInterval;
+
+            bool shouldBeVisible = ShouldBeVisible() && !SceneExplorerPlugin.DialogSceneActive;
+            if (shouldBeVisible != _visible)
+            {
+                _visible = shouldBeVisible;
+                if (_visible)
+                {
+                    CenterWindow();
+                    RescanFiles();
+                }
+                else
+                {
+                    _selectedIndex = -1;
+                    _tooltipText = "";
+                    SaveWindowSize();
+                }
+            }
+        }
+
+        private void OnGUI()
+        {
+            // v2.1.1: 終了確認・確認ダイアログ（StudioExit/StudioCheck）表示中は
+            // 描画もマウスイベントも完全スキップ（uGUIの確認ボタンのクリックを奪わない）。
+            if (SceneExplorerPlugin.DialogSceneActive)
+            {
+                if (_visible)
+                {
+                    _visible = false;
+                }
+                return;
+            }
+
+            if (!_visible) return;
+
+            // 他プラグイン（Skin Overlay Mod等）がGUI.matrixに残した変換を強制リセット。
+            // これを行わないとスケール・オフセットが掛かり、ウィンドウが左上の小領域に縮小描画される。
+            // SettingsUi.csは短小ウィンドウで影響が小さいため非顕在化しているが、原理は同じ。
+            GUI.matrix = Matrix4x4.identity;
+
+            // v2.0.6: 他プラグインがPopし忘れたGUIClipスタックを剥がす（クリップリーク対策）
+            ResetClipLeak();
+
+            // v2.6.0: モーダル化 — ウィンドウ背後のゲームUIへのクリック貫通を防止。
+            // 全画面の透明Buttonをウィンドウより奥（depth=0）に配置し、クリックイベントを吸収する。
+            // GUI.Window（depth=-1000）が前面なのでブラウザ操作は妨げない。
+            GUI.depth = 0;
+            GUI.color = new Color(0, 0, 0, 0);
+            GUI.backgroundColor = new Color(0, 0, 0, 0);
+            GUI.Button(new Rect(0, 0, Screen.width, Screen.height), _clearTex);
+            GUI.color = Color.white;
+            GUI.backgroundColor = Color.white;
+
+            // 最前面に描画（他プラグインのIMGUIウィンドウに覆われないように。GUI.depthは小さいほど前面）
+            GUI.depth = -1000;
+
+            InitStylesOnce();
+
+            // ウィンドウドラッグ
+            // v2.0.7: GUI.Window に変更（GUILayout.Window はレイアウト計算（LayoutSingleGroup→Internal_MoveWindow）が
+            // ネイティブのウィンドウRectを上書きして MinWindowWidth/Height へ縮小するため、レイアウト計算を根本回避）。
+            // GUI.Window は clientRect をそのまま使用し、ドラッグはネイティブ標準で機能する（返り値がドラッグ後Rect）。
+            // v2.5.3: 空タイトルで標準タイトルバーを非表示化。カスタムヘッダーは DrawWindow 内で描画。
+            Rect winResult = GUI.Window(WindowId, _windowRect, DrawWindow, "");
+            _windowRect.x = winResult.x;
+            _windowRect.y = winResult.y;
+
+            // リサイズハンドル処理（ウィンドウ外のイベントなのでここで処理）
+            HandleWindowResize();
+
+            ConstrainWindow();
+
+            // ツールチップ描画（マウス追従＋画面端クランプ）
+            if (!string.IsNullOrEmpty(_tooltipText) && Event.current.type == EventType.Repaint)
+            {
+                DrawTooltip();
+            }
+
+            // サイズ変化を遅延保存（ドラッグ中の頻繁なI/Oを避ける）
+            if (_windowRect.width != _lastSavedWidth || _windowRect.height != _lastSavedHeight)
+            {
+                if (Time.time > _saveDebounceTime)
+                {
+                    SaveWindowSize();
+                }
+            }
+        }
+
+        // v2.2.0: ウィンドウ右下ドラッグでリサイズ
+        private void HandleWindowResize()
+        {
+            var e = Event.current;
+            var resizeRect = new Rect(
+                _windowRect.xMax - ResizeHandleSize,
+                _windowRect.yMax - ResizeHandleSize,
+                ResizeHandleSize,
+                ResizeHandleSize);
+
+            if (e.type == EventType.MouseDown && resizeRect.Contains(e.mousePosition))
+            {
+                _draggingResize = true;
+                _resizeStartPos = e.mousePosition;
+                _resizeStartRect = _windowRect;
+                e.Use();
+            }
+            else if (e.type == EventType.MouseDrag && _draggingResize)
+            {
+                float newW = _resizeStartRect.width + (e.mousePosition.x - _resizeStartPos.x);
+                float newH = _resizeStartRect.height + (e.mousePosition.y - _resizeStartPos.y);
+                float screenW = Screen.width - 20f;
+                float screenH = Screen.height - 20f;
+                _windowRect.width = Mathf.Clamp(newW, Mathf.Min(MinWindowWidth, screenW), screenW);
+                _windowRect.height = Mathf.Clamp(newH, Mathf.Min(MinWindowHeight, screenH), screenH);
+                _saveDebounceTime = Time.time + 0.5f;
+                e.Use();
+            }
+            else if (e.type == EventType.MouseUp && _draggingResize)
+            {
+                _draggingResize = false;
+                SaveWindowSize();
+                e.Use();
+            }
+
+            // カーカル変更（リサイズ領域にマウスが来たらサイズ変更カーソルに）
+            if (resizeRect.Contains(e.mousePosition) && !_draggingSplitter)
+            {
+                // IMGUIではCursorの変更が直接できないため、ツールチップでリサイズ可能を示す
+                _tooltipText = "\u30ea\u30b5\u30a4\u30ba"; // リサイズ
+                _tooltipRect = new Rect(e.mousePosition.x + TooltipOffsetX, e.mousePosition.y + TooltipOffsetY, 60, 20);
+            }
+        }
+
+        private void SaveWindowSize()
+        {
+            int w = Mathf.RoundToInt(_windowRect.width);
+            int h = Mathf.RoundToInt(_windowRect.height);
+            if (w != _lastSavedWidth || h != _lastSavedHeight)
+            {
+                _lastSavedWidth = w;
+                _lastSavedHeight = h;
+                SceneExplorerPlugin.BrowserWidth.Value = w;
+                SceneExplorerPlugin.BrowserHeight.Value = h;
+            }
+        }
+
+        // v2.0.6: GUIClipリーク対策。UnityEngine.GUIClipはinternalクラスなのでリフレクションでアクセスする。
+        // visibleRect（public）が画面全体未満ならスタックが積まれてる＝Popを上限ガード付きで剥がす。
+        private static void ResetClipLeak()
+        {
+            try
+            {
+                if (_clipType == null)
+                {
+                    _clipType = typeof(GUI).Assembly.GetType("UnityEngine.GUIClip");
+                    if (_clipType == null) return;
+                    _clipVisibleRect = _clipType.GetProperty("visibleRect", BindingFlags.Static | BindingFlags.Public);
+                    _clipPop = _clipType.GetMethod("Pop", BindingFlags.Static | BindingFlags.NonPublic);
+                    if (_clipVisibleRect == null || _clipPop == null) return;
+                }
+                Rect visible = (Rect)_clipVisibleRect.GetValue(null, null);
+                bool clipped = visible.width < Screen.width - 0.5f || visible.height < Screen.height - 0.5f;
+                if (!clipped) return;
+                int guard = 0;
+                string before = visible.x + "," + visible.y + "," + visible.width + "x" + visible.height;
+                while (guard++ < 64)
+                {
+                    try
+                    {
+                        _clipPop.Invoke(null, null);
+                    }
+                    catch (Exception)
+                    {
+                        break;
+                    }
+                    visible = (Rect)_clipVisibleRect.GetValue(null, null);
+                    if (visible.width >= Screen.width - 0.5f && visible.height >= Screen.height - 0.5f) break;
+                }
+                if (!_clipWarned)
+                {
+                    _clipWarned = true;
+                    visible = (Rect)_clipVisibleRect.GetValue(null, null);
+                    SceneExplorerPlugin.Log.LogInfo("クリップリークをリセットしました: " + before + " → " + visible.x + "," + visible.y + "," + visible.width + "x" + visible.height);
+                }
+            }
+            catch (Exception)
+            {
+                // 診断不能な環境では黙って無視（描画は継続）
+            }
+        }
+
+        private void OnDestroy()
+        {
+            if (_selectedRowTex != null) Destroy(_selectedRowTex);
+            if (_hoverRowTex != null) Destroy(_hoverRowTex);
+            if (_splitterTex != null) Destroy(_splitterTex);
+            if (_selectedItemTex != null) Destroy(_selectedItemTex);
+            if (_hoverItemTex != null) Destroy(_hoverItemTex);
+            if (_emptyThumbTex != null) Destroy(_emptyThumbTex);
+            if (_tooltipBgTex != null) Destroy(_tooltipBgTex);
+            if (_resizeHandleTex != null) Destroy(_resizeHandleTex);
+            if (_titleBarTex != null) Destroy(_titleBarTex);
+            if (_windowBgTex != null) Destroy(_windowBgTex);
+            if (_clearTex != null) Destroy(_clearTex);
+            ClearThumbnailCache();
+            SaveWindowSize();
+        }
+
+        // ═══════════════════════════════════════════════════════
+        // 可視判定
+        // ═══════════════════════════════════════════════════════
+
+        private static bool IsLoadSceneVisible()
+        {
+            return SceneExplorerPlugin.activeLoadScene != null;
+        }
+
+        // シーン一覧ダイアログ（SceneLoadScene）が存在する間のみ表示
+        private bool ShouldBeVisible()
+        {
+            return SceneExplorerPlugin.activeLoadScene != null;
+        }
+
+        // ═══════════════════════════════════════════════════════
+        // スタイル初期化（OnGUI初回のみ）
+        // ═══════════════════════════════════════════════════════
+
+        private void InitStylesOnce()
+        {
+            if (_stylesReady) return;
+
+            var skin = GUI.skin;
+            int fs = SceneExplorerPlugin.FontSize.Value;
+
+            _nodeButtonStyle = new GUIStyle(skin.label);
+            _nodeButtonStyle.normal.textColor = new Color(0.88f, 0.88f, 0.88f);
+            _nodeButtonStyle.onNormal.background = _selectedRowTex;
+            _nodeButtonStyle.onNormal.textColor = Color.white;
+            _nodeButtonStyle.hover.textColor = new Color(0.6f, 0.8f, 1.0f);
+            _nodeButtonStyle.focused.textColor = new Color(0.6f, 0.8f, 1.0f);
+            _nodeButtonStyle.fontSize = fs;
+            _nodeButtonStyle.alignment = TextAnchor.MiddleLeft;
+            _nodeButtonStyle.padding = new RectOffset(4, 4, 2, 2);
+            _nodeButtonStyle.richText = true;
+
+            _filterStyle = new GUIStyle(skin.textField);
+            _filterStyle.fontSize = fs;
+
+            _selectedItemStyle = new GUIStyle(skin.label);
+            _selectedItemStyle.normal.textColor = Color.white;
+            _selectedItemStyle.alignment = TextAnchor.UpperCenter;
+            _selectedItemStyle.wordWrap = true;
+            _selectedItemStyle.fontSize = fs;
+            _selectedItemStyle.padding = new RectOffset(2, 2, 0, 0);
+
+            _dateStyle = new GUIStyle(skin.label);
+            _dateStyle.normal.textColor = new Color(0.6f, 0.6f, 0.6f);
+            _dateStyle.fontSize = fs;
+            _dateStyle.alignment = TextAnchor.UpperCenter;
+
+            _toolbarButtonStyle = new GUIStyle(skin.button);
+            _toolbarButtonStyle.fontSize = fs;
+            _toolbarButtonStyle.padding = new RectOffset(8, 8, 4, 4);
+            _toolbarButtonStyle.fixedHeight = ButtonHeight;
+
+            _pageLabelStyle = new GUIStyle(skin.label);
+            _pageLabelStyle.normal.textColor = new Color(0.85f, 0.85f, 0.85f);
+            _pageLabelStyle.alignment = TextAnchor.MiddleCenter;
+            _pageLabelStyle.fontSize = fs;
+
+            _tooltipStyle = new GUIStyle(skin.label);
+            _tooltipStyle.normal.background = _tooltipBgTex;
+            _tooltipStyle.normal.textColor = new Color(0.95f, 0.95f, 0.95f, 1f);
+            _tooltipStyle.fontSize = fs;
+            _tooltipStyle.padding = new RectOffset(6, 6, 4, 4);
+            _tooltipStyle.wordWrap = false;
+
+            _splitterStyle = new GUIStyle();
+            _splitterStyle.normal.background = _splitterTex;
+
+            _countLabelStyle = new GUIStyle(skin.label);
+            _countLabelStyle.normal.textColor = new Color(0.75f, 0.75f, 0.75f);
+            _countLabelStyle.alignment = TextAnchor.MiddleLeft;
+            _countLabelStyle.fontSize = fs;
+
+            // v2.5.3: カスタムタイトルバースタイル
+            _titleBarStyle = new GUIStyle(skin.label);
+            _titleBarStyle.normal.background = _titleBarTex;
+            _titleBarStyle.normal.textColor = new Color(0.85f, 0.85f, 0.85f);
+            _titleBarStyle.fontSize = fs;
+            _titleBarStyle.alignment = TextAnchor.MiddleLeft;
+            _titleBarStyle.padding = new RectOffset(8, 8, 4, 4);
+
+            _stylesReady = true;
+        }
+
+        /// <summary>フォントサイズ変更を反映するため、次回OnGUIでスタイルを再生成させる。</summary>
+        public void RefreshStyles()
+        {
+            _stylesReady = false;
+        }
+
+        // ═══════════════════════════════════════════════════════
+        // メインウィンドウ描画
+        // ═══════════════════════════════════════════════════════
+
+        private void DrawWindow(int id)
+        {
+            _tooltipText = "";
+
+            // v2.6.0: ウィンドウ背景をほぼ不透明で描画（Unity標準の透過背景を上書き）
+            var fullRect = new Rect(0, 0, _windowRect.width, _windowRect.height);
+            if (Event.current.type == EventType.Repaint)
+            {
+                GUI.DrawTexture(fullRect, _windowBgTex, ScaleMode.StretchToFill);
+            }
+
+            // 1) フォルダが変更されていたら再スキャン
+            CheckFolderChanged();
+
+            // v2.5.3: カスタムタイトルバー（標準タイトルバーの見切れ対策）
+            var titleRect = new Rect(0, 0, fullRect.width, TitleBarHeight);
+            var toolbarRect = new Rect(0, titleRect.yMax, fullRect.width, ToolbarHeight + 4);
+            var contentRect = new Rect(0, toolbarRect.yMax, fullRect.width, fullRect.height - toolbarRect.yMax);
+            var bottomRect = new Rect(0, contentRect.yMax - BottomBarHeight, fullRect.width, BottomBarHeight);
+            var bodyRect = new Rect(contentRect.x, contentRect.y, contentRect.width, contentRect.height - BottomBarHeight);
+
+            // タイトルバー描画
+            if (Event.current.type == EventType.Repaint)
+            {
+                _titleBarStyle.Draw(titleRect, "\u2601 \u30b7\u30fc\u30f3\u3092\u958b\u304f", false, false, false, false); // ☁ シーンを開く
+            }
+
+            DrawToolbar(toolbarRect);
+            DrawSplitContent(bodyRect);
+            DrawBottomBar(bottomRect);
+
+            // リサイズハンドル（右下）
+            if (Event.current.type == EventType.Repaint)
+            {
+                var rh = new Rect(fullRect.xMax - ResizeHandleSize, fullRect.yMax - ResizeHandleSize, ResizeHandleSize, ResizeHandleSize);
+                GUI.DrawTexture(rh, _resizeHandleTex);
+                // 三角形風のインジケータ
+                GUI.color = new Color(0.6f, 0.6f, 0.6f);
+                for (int i = 0; i < 4; i++)
+                {
+                    float ofs = 2 + i * 3;
+                    GUI.DrawTexture(new Rect(rh.xMax - ofs, rh.yMax - 1, 1, -(ofs)), _splitterTex);
+                }
+                GUI.color = Color.white;
+            }
+
+            // ドラッグ領域: タイトルバー全体
+            GUI.DragWindow(titleRect);
+        }
+
+
+        // ── ツールバー ──
+        private void DrawToolbar(Rect rect)
+        {
+            GUILayout.BeginArea(rect);
+            GUILayout.BeginHorizontal();
+
+            // ソートボタン
+            GUI.backgroundColor = _sortMode == SortMode.Name ? new Color(0.3f, 0.5f, 0.9f) : Color.white;
+            if (GUILayout.Button("\u540d\u524d", _toolbarButtonStyle, GUILayout.Width(SortButtonWidth))) ToggleSort(SortMode.Name); // 名前
+            GUI.backgroundColor = _sortMode == SortMode.Date ? new Color(0.3f, 0.5f, 0.9f) : Color.white;
+            if (GUILayout.Button("\u65e5\u6642", _toolbarButtonStyle, GUILayout.Width(SortButtonWidth))) ToggleSort(SortMode.Date); // 日時
+            GUI.backgroundColor = _sortMode == SortMode.Size ? new Color(0.3f, 0.5f, 0.9f) : Color.white;
+            if (GUILayout.Button("Size", _toolbarButtonStyle, GUILayout.Width(SortButtonWidth))) ToggleSort(SortMode.Size);
+            GUI.backgroundColor = Color.white;
+
+            // 昇順/降順トグル
+            string arrow = _sortDescending ? "\u25bc" : "\u25b2"; // ▼ ▲
+            if (GUILayout.Button(arrow, _toolbarButtonStyle, GUILayout.Width(ArrowButtonWidth)))
+            {
+                _sortDescending = !_sortDescending;
+                SortItems();
+            }
+
+            GUILayout.FlexibleSpace();
+
+            // サムネサイズスライダー
+            GUILayout.Label("\u30b5\u30e0\u30cd:", GUILayout.Width(FontSliderLabelWidth)); // サムネ:
+            _thumbSize = GUILayout.HorizontalSlider(_thumbSize, 48f, 480f, GUILayout.Width(SliderWidth));
+            GUILayout.Label(((int)_thumbSize).ToString() + "px", GUILayout.Width(FontSliderPxWidth));
+
+            GUILayout.EndHorizontal();
+            GUILayout.EndArea();
+        }
+
+        // フォント連動のラベル幅
+        private float FontSliderLabelWidth { get { return Mathf.Max(50f, FontSizeVal * 3.5f); } }
+        private float FontSliderPxWidth { get { return Mathf.Max(35f, FontSizeVal * 2.5f); } }
+
+        // ── 分割ペイン描画 ──
+        private void DrawSplitContent(Rect body)
+        {
+            // スプリッターのドラッグ処理
+            var splitterRect = new Rect(body.x + _splitPos, body.y, 6f, body.height);
+            HandleSplitterDrag(splitterRect, body);
+
+            // 左: ツリーペイン
+            var treeRect = new Rect(body.x, body.y, _splitPos - 3f, body.height);
+            DrawTreePanel(treeRect);
+
+            // スプリッター描画
+            if (Event.current.type == EventType.Repaint)
+            {
+                GUI.skin.box.Draw(splitterRect, false, false, false, false);
+            }
+
+            // 右: グリッドペイン
+            float gridX = splitterRect.xMax;
+            float gridW = body.xMax - gridX;
+            var gridRect = new Rect(gridX, body.y, gridW, body.height);
+            DrawGridPanel(gridRect);
+        }
+
+        // ── スプリッタードラッグ ──
+        private void HandleSplitterDrag(Rect splitterRect, Rect body)
+        {
+            var e = Event.current;
+            if (e.type == EventType.MouseDown && splitterRect.Contains(e.mousePosition))
+            {
+                _draggingSplitter = true;
+                e.Use();
+            }
+            else if (e.type == EventType.MouseDrag && _draggingSplitter)
+            {
+                _splitPos = Mathf.Clamp(e.mousePosition.x - body.x, 120f, body.width - 120f);
+                e.Use();
+                GUI.changed = true;
+            }
+            else if (e.type == EventType.MouseUp && _draggingSplitter)
+            {
+                _draggingSplitter = false;
+                e.Use();
+            }
+        }
+
+        // ── ボトムバー（v2.2.0: ページング廃止、全件表示） ──
+        private void DrawBottomBar(Rect rect)
+        {
+            GUILayout.BeginArea(rect);
+            GUILayout.BeginHorizontal();
+
+            // 全件数表示
+            GUILayout.Label("All " + _items.Count.ToString(), _countLabelStyle, GUILayout.Width(CountLabelWidth));
+
+            GUILayout.FlexibleSpace();
+
+            // v2.5.4: ボタン幅をFlexibleWidth化（ウィンドウ幅に応じて均等スケール）。ラベル英語化。
+            GUI.enabled = _selectedIndex >= 0;
+            if (GUILayout.Button("Load", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
+            {
+                LoadSelected();
+            }
+            GUI.enabled = true;
+
+            GUI.enabled = _selectedIndex >= 0;
+            if (GUILayout.Button("Import", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
+            {
+                ImportSelected();
+            }
+            GUI.enabled = true;
+
+            // デリート（二段階確認）
+            if (_deleteConfirm)
+            {
+                if (Time.time - _deleteConfirmTime > DeleteResetSeconds)
+                {
+                    _deleteConfirm = false;
+                }
+                GUI.backgroundColor = new Color(0.9f, 0.2f, 0.2f);
+                GUI.enabled = _selectedIndex >= 0;
+                if (GUILayout.Button("Delete?", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
+                {
+                    DeleteSelected();
+                    _deleteConfirm = false;
+                }
+                GUI.enabled = true;
+                GUI.backgroundColor = Color.white;
+            }
+            else
+            {
+                GUI.enabled = _selectedIndex >= 0;
+                if (GUILayout.Button("Delete", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
+                {
+                    _deleteConfirm = true;
+                    _deleteConfirmTime = Time.time;
+                }
+                GUI.enabled = true;
+            }
+
+            if (GUILayout.Button("Close", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
+            {
+                CloseScene();
+            }
+
+            GUILayout.EndHorizontal();
+            GUILayout.EndArea();
+        }
+
+        // 全件数ラベル幅
+        private float CountLabelWidth { get { return Mathf.Max(60f, FontSizeVal * 4.5f); } }
+
+        // ═══════════════════════════════════════════════════════
+        // ツリーペイン（SceneTree.cs の DrawNode を統合）
+        // ═══════════════════════════════════════════════════════
+
+        private void DrawTreePanel(Rect panelRect)
+        {
+            GUILayout.BeginArea(panelRect);
+
+            // 検索 + 更新
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("\u26b2", GUILayout.Width(16)); // ⚲
+            string newFilter = GUILayout.TextField(_treeFilter, _filterStyle, GUILayout.ExpandWidth(true));
+            if (newFilter != _treeFilter)
+            {
+                _treeFilter = newFilter;
+                _dirChildrenCache.Clear();
+            }
+            if (GUILayout.Button("\u21bb", _toolbarButtonStyle, GUILayout.Width(24))) // ↻
+            {
+                _expandedFolders.Clear();
+                _dirChildrenCache.Clear();
+                RescanFiles();
+            }
+            GUILayout.EndHorizontal();
+
+            // ツリースクロール
+            _treeScroll = GUILayout.BeginScrollView(_treeScroll);
+
+            // ルート群: ローカルルート + 設定されたネットワークフォルダを同じ深さ(0)で並べて描画
+            List<string> roots = new List<string>();
+            bool localAdded = false;
+            string localRoot = UserData.Create("studio/scene");
+            if (!string.IsNullOrEmpty(localRoot) && Directory.Exists(localRoot))
+            {
+                roots.Add(localRoot);
+                localAdded = true;
+            }
+            string[] configuredRoots = SceneExplorerPlugin.ScenePaths.GetConfiguredSceneFolders();
+            if (configuredRoots != null)
+            {
+                for (int i = 0; i < configuredRoots.Length; i++)
+                {
+                    string root = configuredRoots[i];
+                    if (!string.IsNullOrEmpty(root) && Directory.Exists(root))
+                    {
+                        roots.Add(root);
+                    }
+                }
+            }
+            if (roots.Count == 0)
+            {
+                GUILayout.Label("\u30d5\u30a9\u30eb\u30c0\u304c\u898b\u3064\u304b\u308a\u307e\u305b\u3093"); // フォルダが見つかりません
+            }
+            else
+            {
+                for (int i = 0; i < roots.Count; i++)
+                {
+                    string forcedName = (localAdded && i == 0) ? "\u30ed\u30fc\u30ab\u30eb" : null; // ローカル
+                    DrawNode(roots[i], 0, i == roots.Count - 1, forcedName);
+                }
+            }
+
+            GUILayout.EndScrollView();
+            GUILayout.EndArea();
+        }
+
+        private void DrawNode(string folderPath, int indent, bool isLast, string forcedName = null)
+        {
+            string name = forcedName;
+            if (string.IsNullOrEmpty(name))
+            {
+                name = Path.GetFileName(folderPath);
+                if (string.IsNullOrEmpty(name)) name = folderPath;
+            }
+
+            if (!PassesFilter(folderPath, name)) return;
+
+            var e = Event.current;
+            bool hasChildren = HasSubdirectories(folderPath);
+            bool isExpanded = _expandedFolders.Contains(folderPath);
+            string currentFolder = GetCurrentBrowserFolder();
+            bool isSelected = string.Equals(folderPath, currentFolder, StringComparison.OrdinalIgnoreCase);
+
+            // ── ノード行 ──
+            var nodeContent = new GUIContent((isSelected ? "\u25b6 " : "") + name); // ▶ 選択中
+            float nodeHeight = Mathf.Max(_nodeButtonStyle.CalcHeight(nodeContent, 400f), 18f);
+            Rect lineRect = GUILayoutUtility.GetRect(new GUIContent(), GUIStyle.none, GUILayout.Height(nodeHeight));
+
+            // 枝記号
+            float treeX = lineRect.x + indent * IndentPerLevel + ToggleWidth;
+            if (indent > 0)
+            {
+                GUI.color = new Color(0.45f, 0.45f, 0.45f);
+                DrawBranchLines(lineRect, indent, treeX, isLast);
+                GUI.color = Color.white;
+            }
+
+            // トグル
+            if (hasChildren)
+            {
+                Rect toggleRect = new Rect(treeX, lineRect.y, ToggleWidth, lineRect.height);
+                string toggleLabel = isExpanded ? "\u25bc" : "\u25b6"; // ▼ ▶
+                if (GUI.Button(toggleRect, toggleLabel, GUIStyle.none))
+                {
+                    ToggleExpand(folderPath);
+                    GUI.changed = true;
+                }
+                treeX += ToggleWidth;
+            }
+
+            // ノードボタン
+            Rect nodeRect = new Rect(treeX, lineRect.y, lineRect.xMax - treeX, lineRect.height);
+            if (e.type == EventType.MouseDown && nodeRect.Contains(e.mousePosition) && e.clickCount == 1)
+            {
+                SelectFolder(folderPath);
+                e.Use();
+            }
+
+            // ハイライト
+            if (isSelected)
+            {
+                GUI.DrawTexture(lineRect, _selectedRowTex, ScaleMode.StretchToFill);
+            }
+            else if (nodeRect.Contains(e.mousePosition))
+            {
+                GUI.DrawTexture(lineRect, _hoverRowTex, ScaleMode.StretchToFill);
+                _tooltipText = folderPath;
+                Vector2 tipPos801 = GUIUtility.GUIToScreenPoint(e.mousePosition);
+                _tooltipRect = new Rect(tipPos801.x + TooltipOffsetX, tipPos801.y + TooltipOffsetY, 340, 22);
+            }
+
+            GUI.Label(nodeRect, nodeContent, _nodeButtonStyle);
+
+            // ── 子ノード（再帰描画）──
+            if (isExpanded)
+            {
+                List<DirEntry> children = GetCachedChildren(folderPath);
+                for (int i = 0; i < children.Count; i++)
+                {
+                    bool childIsLast = i == children.Count - 1;
+                    DrawNode(children[i].FullPath, indent + 1, childIsLast);
+                }
+            }
+        }
+
+        private void DrawBranchLines(Rect lineRect, int indent, float treeX, bool isLast)
+        {
+            float midY = lineRect.y + lineRect.height * 0.5f;
+            float branchX = treeX - TreeLineWidth;
+
+            // 水平ブランチ
+            DrawHorizontalLine(branchX + 2, treeX - 2, midY);
+
+            // 垂直ライン
+            if (isLast)
+            {
+                DrawVerticalLine(branchX, lineRect.y, midY);
+            }
+            else
+            {
+                DrawVerticalLine(branchX, lineRect.y, lineRect.yMax);
+            }
+        }
+
+        private void DrawHorizontalLine(float x1, float x2, float y)
+        {
+            GUI.DrawTexture(new Rect(x1, y, x2 - x1, 1), _splitterTex);
+        }
+
+        private void DrawVerticalLine(float x, float y1, float y2)
+        {
+            GUI.DrawTexture(new Rect(x, y1, 1, y2 - y1), _splitterTex);
+        }
+
+        // ═══════════════════════════════════════════════════════
+        // グリッドペイン（右側）— v2.2.0: スクロール式（全件表示）
+        // ═══════════════════════════════════════════════════════
+
+        private void DrawGridPanel(Rect panelRect)
+        {
+            if (_items.Count == 0)
+            {
+                GUILayout.BeginArea(panelRect);
+                GUILayout.FlexibleSpace();
+                GUILayout.BeginHorizontal();
+                GUILayout.FlexibleSpace();
+                GUILayout.Label("\u30b7\u30fc\u30f3\u30d5\u30a1\u30a4\u30eb\u304c\u3042\u308a\u307e\u305b\u3093", _pageLabelStyle); // シーンファイルがありません
+                GUILayout.FlexibleSpace();
+                GUILayout.EndHorizontal();
+                GUILayout.FlexibleSpace();
+                GUILayout.EndArea();
+                return;
+            }
+
+            // グリッド計算
+            float cellW = _thumbSize + ItemPadX * 2;
+            float cellH = _thumbSize + TextLineHeight * 3 + ItemPadY * 2 + ItemGap;
+            int cols = Mathf.Max(1, Mathf.FloorToInt((panelRect.width - 16) / (cellW + ItemSpacing)));
+            float gridTotalW = cols * (cellW + ItemSpacing) - ItemSpacing;
+            float offsetX = (panelRect.width - gridTotalW) / 2f;
+
+            // 全件スクロール
+            int totalItems = _items.Count;
+            int rows = Mathf.CeilToInt((float)totalItems / cols);
+            float contentH = rows * (cellH + ItemSpacing) + ItemPadY;
+            Rect viewRect = new Rect(panelRect.x, panelRect.y, panelRect.width, panelRect.height);
+            Rect contentRect = new Rect(0, 0, gridTotalW, contentH);
+
+            _gridScroll = GUI.BeginScrollView(viewRect, _gridScroll, contentRect);
+
+            int itemIndex = 0;
+            for (int row = 0; row < rows; row++)
+            {
+                for (int col = 0; col < cols && itemIndex < totalItems; col++, itemIndex++)
+                {
+                    float x = col * (cellW + ItemSpacing);
+                    float y = row * (cellH + ItemSpacing) + ItemPadY;
+                    var itemRect = new Rect(x, y, cellW, cellH);
+                    DrawGridItem(itemRect, itemIndex);
+                }
+            }
+
+            GUI.EndScrollView();
+        }
+
+        private void DrawGridItem(Rect rect, int index)
+        {
+            var item = _items[index];
+            var e = Event.current;
+            bool isSelected = index == _selectedIndex;
+            bool isHover = rect.Contains(e.mousePosition);
+
+            // 背景
+            if (isSelected)
+            {
+                GUI.DrawTexture(rect, _selectedItemTex, ScaleMode.StretchToFill);
+            }
+            else if (isHover)
+            {
+                GUI.DrawTexture(rect, _hoverItemTex, ScaleMode.StretchToFill);
+            }
+
+            // サムネイル
+            float thumbX = rect.x + (rect.width - _thumbSize) / 2f;
+            float thumbY = rect.y + ItemPadY;
+            var thumbRect = new Rect(thumbX, thumbY, _thumbSize, _thumbSize);
+            Texture2D tex = GetThumbnail(item);
+            if (tex != null)
+            {
+                GUI.DrawTexture(thumbRect, tex, ScaleMode.ScaleToFit);
+            }
+            else
+            {
+                GUI.DrawTexture(thumbRect, _emptyThumbTex);
+                GUI.Label(thumbRect, "\u2609", _pageLabelStyle); // ☉ プレースホルダー
+            }
+
+            // ファイル名
+            float textY = thumbRect.yMax + ItemGap;
+            var nameRect = new Rect(rect.x + 2, textY, rect.width - 4, TextLineHeight);
+            GUI.Label(nameRect, item.FileName, _selectedItemStyle);
+
+            // 更新日時
+            var dateRect = new Rect(rect.x + 2, nameRect.yMax, rect.width - 4, TextLineHeight);
+            GUI.Label(dateRect, item.LastWriteTime.ToString("yyyy/MM/dd HH:mm"), _dateStyle);
+
+            // ファイルサイズ
+            var sizeRect = new Rect(rect.x + 2, dateRect.yMax, rect.width - 4, TextLineHeight);
+            GUI.Label(sizeRect, FormatFileSize(item.FileSize), _dateStyle);
+
+            // クリック処理
+            if (e.type == EventType.MouseDown && rect.Contains(e.mousePosition))
+            {
+                if (e.clickCount == 1)
+                {
+                    _selectedIndex = index;
+                    e.Use();
+                }
+                else if (e.clickCount == 2)
+                {
+                    _selectedIndex = index;
+                    LoadSelected();
+                    e.Use();
+                }
+            }
+
+            // ツールチップ
+            if (isHover && e.type == EventType.Repaint)
+            {
+                _tooltipText = item.FileName + "\n" + item.LastWriteTime.ToString("yyyy/MM/dd HH:mm:ss") + "\n" + FormatFileSize(item.FileSize);
+                Vector2 tipPos963 = GUIUtility.GUIToScreenPoint(e.mousePosition);
+                _tooltipRect = new Rect(tipPos963.x + TooltipOffsetX, tipPos963.y + TooltipOffsetY, 300, 46);
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════
+        // ツールチップ描画（v2.2.0: マウス追従＋画面端クランプ）
+        // ═══════════════════════════════════════════════════════
+
+        private void DrawTooltip()
+        {
+            if (string.IsNullOrEmpty(_tooltipText)) return;
+
+            // ツールチップサイズを計算
+            Vector2 size = _tooltipStyle.CalcSize(new GUIContent(_tooltipText));
+            float tw = size.x + _tooltipStyle.padding.left + _tooltipStyle.padding.right;
+            float th = size.y + _tooltipStyle.padding.top + _tooltipStyle.padding.bottom;
+
+            // マウス位置からオフセット
+            float tx = _tooltipRect.x;
+            float ty = _tooltipRect.y;
+
+            // 画面端クランプ（右端・下端にはみ出さないように）
+            float screenW = Screen.width;
+            float screenH = Screen.height;
+            if (tx + tw > screenW - TooltipPad)
+            {
+                tx = screenW - tw - TooltipPad;
+            }
+            if (ty + th > screenH - TooltipPad)
+            {
+                ty = screenH - th - TooltipPad;
+            }
+            if (tx < TooltipPad) tx = TooltipPad;
+            if (ty < TooltipPad) ty = TooltipPad;
+
+            Rect finalRect = new Rect(tx, ty, tw, th);
+            GUI.Label(finalRect, _tooltipText, _tooltipStyle);
+        }
+
+        // ═══════════════════════════════════════════════════════
+        // アクション
+        // ═══════════════════════════════════════════════════════
+
+        private void LoadSelected()
+        {
+            if (_selectedIndex < 0 || _selectedIndex >= _items.Count) return;
+            var item = _items[_selectedIndex];
+            try
+            {
+                SceneExplorerPlugin.Log.LogInfo("[SceneBrowser] Loading: " + item.FilePath);
+                StartCoroutine(LoadSceneRoutine(item.FilePath));
+            }
+            catch (Exception ex)
+            {
+                SceneExplorerPlugin.Log.LogError("[SceneBrowser] 追加に失敗しました: " + item.FilePath + ": " + ex.Message);
+            }
+        }
+
+        private IEnumerator LoadSceneRoutine(string path)
+        {
+            _loading = true;
+            _visible = false;
+            yield return Studio.Studio.Instance.LoadSceneCoroutine(path);
+            yield return null;
+            try
+            {
+                Singleton<Manager.Scene>.Instance.UnLoad();
+            }
+            catch (Exception ex)
+            {
+                SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] シーン読み込み後のダイアログ破棄に失敗: " + ex.Message);
+            }
+            _loading = false;
+        }
+
+        private void ImportSelected()
+        {
+            if (_selectedIndex < 0 || _selectedIndex >= _items.Count) return;
+            var item = _items[_selectedIndex];
+            try
+            {
+                SceneExplorerPlugin.Log.LogInfo("[SceneBrowser] Importing: " + item.FilePath);
+                Studio.Studio.Instance.ImportScene(item.FilePath);
+            }
+            catch (Exception ex)
+            {
+                SceneExplorerPlugin.Log.LogError("[SceneBrowser] Import failed: " + ex.Message);
+            }
+        }
+
+        private void DeleteSelected()
+        {
+            if (_selectedIndex < 0 || _selectedIndex >= _items.Count) return;
+            var item = _items[_selectedIndex];
+            try
+            {
+                SceneExplorerPlugin.Log.LogInfo("[SceneBrowser] Deleting: " + item.FilePath);
+                File.Delete(item.FilePath);
+                RemoveThumbnailFromCache(item.FilePath);
+                _items.RemoveAt(_selectedIndex);
+                _selectedIndex = -1;
+            }
+            catch (Exception ex)
+            {
+                SceneExplorerPlugin.Log.LogError("[SceneBrowser] Delete failed: " + ex.Message);
+            }
+        }
+
+        private void CloseScene()
+        {
+            try
+            {
+                Singleton<Manager.Scene>.Instance.UnLoad();
+            }
+            catch (Exception ex)
+            {
+                SceneExplorerPlugin.Log.LogError("[SceneBrowser] Close failed: " + ex.Message);
+            }
+        }
+
+		// ═══════════════════════════════════════════════════════
+		// データ取得・ソート
+		// ═══════════════════════════════════════════════════════
+
+        private void CheckFolderChanged()
+        {
+            string current = GetCurrentBrowserFolder();
+            if (!string.Equals(current, _lastScannedFolder, StringComparison.OrdinalIgnoreCase))
+            {
+                RescanFiles();
+            }
+        }
+
+        private void RescanFiles()
+        {
+            _lastScannedFolder = GetCurrentBrowserFolder();
+            _items.Clear();
+            _selectedIndex = -1;
+            _gridScroll = Vector2.zero;
+
+            string basePath = _lastScannedFolder;
+            if (string.IsNullOrEmpty(basePath))
+            {
+                basePath = SceneExplorerPlugin.GetBrowserBasePath();
+            }
+            if (string.IsNullOrEmpty(basePath) || !Directory.Exists(basePath)) return;
+
+            try
+            {
+                string[] files = SceneExplorerPlugin.ScenePaths.ScanFolder(basePath, "*.png");
+                if (files == null) return;
+
+                for (int i = 0; i < files.Length; i++)
+                {
+                    string path = files[i];
+                    try
+                    {
+                        var fi = new FileInfo(path);
+                        var item = new SceneItem
+                        {
+                            FilePath = path,
+                            FileName = fi.Name,
+                            LastWriteTime = fi.LastWriteTime,
+                            FileSize = fi.Length,
+                            Thumbnail = null,
+                            ThumbLoaded = false
+                        };
+                        _items.Add(item);
+                    }
+                    catch (Exception ex)
+                    {
+                        SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] FileInfo error: " + path + " - " + ex.Message);
+                    }
+                }
+
+                SortItems();
+            }
+            catch (Exception ex)
+            {
+                SceneExplorerPlugin.Log.LogError("[SceneBrowser] Scan failed: " + ex.Message);
+            }
+        }
+
+        private void SortItems()
+        {
+            switch (_sortMode)
+            {
+                case SortMode.Name:
+                    _items.Sort((a, b) => string.Compare(a.FileName, b.FileName, StringComparison.OrdinalIgnoreCase));
+                    break;
+                case SortMode.Date:
+                    _items.Sort((a, b) => a.LastWriteTime.CompareTo(b.LastWriteTime));
+                    break;
+                case SortMode.Size:
+                    _items.Sort((a, b) => a.FileSize.CompareTo(b.FileSize));
+                    break;
+            }
+            if (_sortDescending) _items.Reverse();
+        }
+
+        private void ToggleSort(SortMode mode)
+        {
+            if (_sortMode == mode)
+            {
+                _sortDescending = !_sortDescending;
+            }
+            else
+            {
+                _sortMode = mode;
+                _sortDescending = true;
+            }
+            SortItems();
+        }
+
+        // ═══════════════════════════════════════════════════════
+        // サムネイルキャッシュ
+        // ═══════════════════════════════════════════════════════
+
+        private Texture2D GetThumbnail(SceneItem item)
+        {
+            // v2.5.1: 破棄済みテクスチャ（Unityではnull扱い）なら再読み込みする
+            if (item.ThumbLoaded && item.Thumbnail != null) return item.Thumbnail;
+
+            Texture2D tex;
+            if (_thumbCache.TryGetValue(item.FilePath, out tex))
+            {
+                item.Thumbnail = tex;
+                item.ThumbLoaded = true;
+                return tex;
+            }
+
+            // ロード（非同期化が必要なら後で対応）
+            try
+            {
+                tex = LoadSceneThumbnail(item.FilePath);
+                if (tex != null)
+                {
+                    AddToThumbnailCache(item.FilePath, tex);
+                    item.Thumbnail = tex;
+                }
+            }
+            catch
+            {
+                // サムネイル読み込み失敗は無視
+            }
+            item.ThumbLoaded = true;
+            return item.Thumbnail;
+        }
+
+        // v2.5.0: KKCC圧縮シーンのサムネ読み込みを堅牢化。
+        // ゲーム標準の PngAssist.LoadTexture は FileShare 指定なしで開くため、NAS等で他プロセス
+        // （Syncthing等）が書き込み中だと IOException になり得る。FileShare.ReadWrite で開き、
+        // PNGのIENDチャンクまでのPNG部分のみ読み取って Texture2D 化する（KKCCの付加データは無視）。
+        private static Texture2D LoadSceneThumbnail(string path)
+        {
+            try
+            {
+                using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                {
+                    byte[] signature = new byte[8];
+                    int sigRead = fs.Read(signature, 0, 8);
+                    if (sigRead < 8) return null;
+                    // PNGシグネチャ: 89 50 4E 47 0D 0A 1A 0A
+                    if (signature[0] != 0x89 || signature[1] != 0x50 || signature[2] != 0x4E || signature[3] != 0x47
+                        || signature[4] != 0x0D || signature[5] != 0x0A || signature[6] != 0x1A || signature[7] != 0x0A)
+                    {
+                        return null;
+                    }
+
+                    long fileSize = fs.Length;
+                    int pos = 8;
+                    bool foundIend = false;
+                    for (int chunk = 0; chunk < 300; chunk++)
+                    {
+                        if ((long)pos + 8 > fileSize) break;
+                        byte[] header = new byte[8];
+                        fs.Position = pos;
+                        int headerRead = fs.Read(header, 0, 8);
+                        if (headerRead < 8) break;
+
+                        int len = (header[0] << 24) | (header[1] << 16) | (header[2] << 8) | header[3];
+                        byte t0 = header[4];
+                        byte t1 = header[5];
+                        byte t2 = header[6];
+                        byte t3 = header[7];
+                        if (len < 0 || (long)pos + 12 + len > fileSize) break;
+                        if (t0 == 0x49 && t1 == 0x45 && t2 == 0x4E && t3 == 0x44) // "IEND"
+                        {
+                            foundIend = true;
+                            pos += 12 + len;
+                            break;
+                        }
+                        pos += 12 + len;
+                    }
+                    if (!foundIend) return null;
+
+                    // IENDチャンク終端までのPNG部分を読み取る
+                    int pngSize = pos;
+                    byte[] data = new byte[pngSize];
+                    fs.Position = 0;
+                    int totalRead = 0;
+                    while (totalRead < pngSize)
+                    {
+                        int n = fs.Read(data, totalRead, pngSize - totalRead);
+                        if (n <= 0) break;
+                        totalRead += n;
+                    }
+                    if (totalRead < pngSize) return null;
+
+                    int width = 0;
+                    int height = 0;
+                    return PngAssist.ChangeTextureFromPngByte(data, ref width, ref height);
+                }
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private void AddToThumbnailCache(string path, Texture2D tex)
+        {
+            if (_thumbCache.ContainsKey(path))
+            {
+                _thumbCache[path] = tex;
+                _thumbCacheOrder.Remove(path);
+                _thumbCacheOrder.Add(path);
+                return;
+            }
+
+            // 上限チェック — 古いものから破棄
+            while (_thumbCacheOrder.Count >= MaxCacheSize)
+            {
+                string oldest = _thumbCacheOrder[0];
+                _thumbCacheOrder.RemoveAt(0);
+                Texture2D oldTex;
+                if (_thumbCache.TryGetValue(oldest, out oldTex))
+                {
+                    _thumbCache.Remove(oldest);
+                    if (oldTex != null) Destroy(oldTex);
+                }
+                // v2.5.1: 追い出されたアイテムは再読み込み可能に戻す。
+                // 破棄済みテクスチャ参照（ThumbLoaded=true のまま）を残すと GetThumbnail が
+                // 再読み込みせず null を返し続け、ファイル数が多いフォルダでサムネが表示されなくなる。
+                for (int i = 0; i < _items.Count; i++)
+                {
+                    if (_items[i].FilePath == oldest)
+                    {
+                        _items[i].ThumbLoaded = false;
+                        _items[i].Thumbnail = null;
+                        break;
+                    }
+                }
+            }
+
+            _thumbCache[path] = tex;
+            _thumbCacheOrder.Add(path);
+        }
+
+        private void RemoveThumbnailFromCache(string path)
+        {
+            Texture2D tex;
+            if (_thumbCache.TryGetValue(path, out tex))
+            {
+                _thumbCache.Remove(path);
+                _thumbCacheOrder.Remove(path);
+                if (tex != null) Destroy(tex);
+            }
+        }
+
+        private void ClearThumbnailCache()
+        {
+            foreach (var tex in _thumbCache.Values)
+            {
+                if (tex != null) Destroy(tex);
+            }
+            _thumbCache.Clear();
+            _thumbCacheOrder.Clear();
+        }
+
+        // ═══════════════════════════════════════════════════════
+        // ツリー状態管理
+        // ═══════════════════════════════════════════════════════
+
+        private void ToggleExpand(string path)
+        {
+            if (_expandedFolders.Contains(path))
+            {
+                _expandedFolders.Remove(path);
+            }
+            else
+            {
+                _expandedFolders.Add(path);
+            }
+            _dirChildrenCache.Remove(path);
+        }
+
+        private void SelectFolder(string path)
+        {
+            // プラグイン側のフィールドを更新（別タスクで実装）
+            SceneExplorerPlugin.CurrentBrowserFolder = path;
+            RescanFiles();
+        }
+
+        private bool HasSubdirectories(string path)
+        {
+            try
+            {
+                return Directory.GetDirectories(path).Length > 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private List<DirEntry> GetCachedChildren(string path)
+        {
+            List<DirEntry> children;
+            if (_dirChildrenCache.TryGetValue(path, out children))
+            {
+                return children;
+            }
+
+            children = new List<DirEntry>();
+            try
+            {
+                string[] dirs = Directory.GetDirectories(path);
+                for (int i = 0; i < dirs.Length; i++)
+                {
+                    string dir = dirs[i];
+                    string dirName = Path.GetFileName(dir);
+                    if (!string.IsNullOrEmpty(dirName) && (string.IsNullOrEmpty(_treeFilter) || dirName.IndexOf(_treeFilter, StringComparison.OrdinalIgnoreCase) >= 0))
+                    {
+                        children.Add(new DirEntry
+                        {
+                            Name = dirName,
+                            FullPath = dir,
+                            HasChildren = HasSubdirectories(dir)
+                        });
+                    }
+                }
+                children.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
+            }
+            catch (Exception ex)
+            {
+                SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] Dir scan error: " + path + " - " + ex.Message);
+            }
+
+            _dirChildrenCache[path] = children;
+            return children;
+        }
+
+        private bool PassesFilter(string folderPath, string name)
+        {
+            if (string.IsNullOrEmpty(_treeFilter)) return true;
+            if (name.IndexOf(_treeFilter, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+
+            // 子孫に一致するものがあるかチェック（再帰的表示用）
+            try
+            {
+                string[] subDirs = Directory.GetDirectories(folderPath, "*" + _treeFilter + "*", SearchOption.AllDirectories);
+                return subDirs.Length > 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════
+        // ユーティリティ
+        // ═══════════════════════════════════════════════════════
+
+        private static string GetCurrentBrowserFolder()
+        {
+            return SceneExplorerPlugin.CurrentBrowserFolder;
+        }
+
+        private static string FormatFileSize(long bytes)
+        {
+            if (bytes < 1024) return bytes.ToString() + " B";
+            if (bytes < 1024 * 1024) return (bytes / 1024).ToString() + " KB";
+            return ((float)bytes / (1024 * 1024)).ToString("F1") + " MB";
+        }
+
+        private void CenterWindow()
+        {
+            float w = Mathf.Min(_lastSavedWidth, Screen.width - 40);
+            float h = Mathf.Min(_lastSavedHeight, Screen.height - 40);
+            _windowRect = new Rect((Screen.width - w) / 2, (Screen.height - h) / 2, w, h);
+        }
+
+        private void ConstrainWindow()
+        {
+            // 画面より大きいウィンドウは画面に収める（DPI/解像度差の安全策）
+            float screenW = Screen.width - 20f;
+            float screenH = Screen.height - 20f;
+            _windowRect.width = Mathf.Min(_windowRect.width, screenW);
+            _windowRect.height = Mathf.Min(_windowRect.height, screenH);
+            // 最小サイズも画面サイズ以下にクランプ（低解像度での画面はみ出し防止）
+            _windowRect.width = Mathf.Max(_windowRect.width, Mathf.Min(MinWindowWidth, screenW));
+            _windowRect.height = Mathf.Max(_windowRect.height, Mathf.Min(MinWindowHeight, screenH));
+            // 安全なClamp（上限が負にならないように）
+            float maxX = Mathf.Max(0f, Screen.width - _windowRect.width);
+            float maxY = Mathf.Max(0f, Screen.height - _windowRect.height);
+            _windowRect.x = Mathf.Clamp(_windowRect.x, 0f, maxX);
+            _windowRect.y = Mathf.Clamp(_windowRect.y, 0f, maxY);
+        }
+    }
+}
