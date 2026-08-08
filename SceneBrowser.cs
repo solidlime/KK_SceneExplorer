@@ -325,6 +325,17 @@ namespace KK_SceneExplorer
 
             if (!_visible) return;
 
+            // Ctrl+ホイールでサムネサイズ変更（ツールバーのスライダーと同範囲・同保存）
+            // ウィンドウ内にマウスがある場合のみ反応（スタジオ側の Ctrl+ホイール操作と衝突しない）
+            if (Event.current.type == EventType.ScrollWheel && Event.current.control &&
+                _windowRect.Contains(Event.current.mousePosition))
+            {
+                float step = (Event.current.delta.y < 0f) ? 8f : -8f;
+                _thumbSize = Mathf.Clamp(_thumbSize + step, 48f, 600f);
+                SceneExplorerPlugin.ThumbSize.Value = (int)_thumbSize;
+                Event.current.Use();
+            }
+
             // 他プラグイン（Skin Overlay Mod等）がGUI.matrixに残した変換を強制リセット。
             // これを行わないとスケール・オフセットが掛かり、ウィンドウが左上の小領域に縮小描画される。
             // SettingsUi.csは短小ウィンドウで影響が小さいため非顕在化しているが、原理は同じ。
