@@ -89,6 +89,8 @@ namespace KK_SceneExplorer
 			}
 			CurrentBrowserMode = (sex == 1) ? BrowserMode.CharaFemale : BrowserMode.CharaMale;
 			CurrentBrowserFolder = GetModeRootFolder();
+			// v3.1.0: ちらつき防止のためパッチ側で直接非表示（Update の遷移ブロックはキャッシュ参照の維持確認のみ）
+			if (charaList.gameObject.activeInHierarchy) charaList.gameObject.SetActive(false);
 			Log.LogInfo("[SceneExplorer] Charaモード: " + CurrentBrowserMode + " folder=" + CurrentBrowserFolder);
 		}
 
@@ -895,12 +897,15 @@ namespace KK_SceneExplorer
 			// _idx==4 の開始時のみ activeInHierarchy でガード（Awake 直後の初期化 OnClickRoot(select=-1) は
 			// CurrentBrowserMode が Scene の間に発火するため else 分岐に入らず無害。パネル非表示時の
 			// OnClickRoot(-1) による解除は許可する = ガードは緩めてある）
+			// さらに、タブクリック以外にもキャラ選択変更（ociChar setter → UpdateInfo → OnClickRoot(select)）
+			// で発火するため、既に Coordinate モード中の再発火（select==4 のまま別キャラ選択）では開始しない。
 			private static void MPCharCtrlOnClickRootPrefix(Studio.MPCharCtrl __instance, int _idx)
 			{
 				if (__instance == null) return;
 				if (_idx == 4)
 				{
 					if (!__instance.gameObject.activeInHierarchy) return;
+					if (SceneExplorerPlugin.CurrentBrowserMode == BrowserMode.Coordinate) return;   // キャラ切替での誤再発火ガード
 					SceneExplorerPlugin.CurrentBrowserMode = BrowserMode.Coordinate;
 					SceneExplorerPlugin.CurrentBrowserFolder = SceneExplorerPlugin.GetModeRootFolder();
 					HideCostumeRoot(__instance);   // 1フレームのちらつき防止のため prefix 内で直接非表示

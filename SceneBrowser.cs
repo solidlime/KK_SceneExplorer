@@ -99,6 +99,9 @@ namespace KK_SceneExplorer
         // v3.1.0: 衣装モードのリフレクション結果キャッシュ（毎フレームの FindObjectOfType / AccessTools 解決を避ける）
         private Studio.MPCharCtrl _mpCharCtrl;
         private UnityEngine.GameObject _costumeRoot;
+        private float _nextCostumeResolveTime;   // ResolveCostumeRoot の再試行間隔（解決失敗時の毎フレーム再試行を防ぐ）
+        // v3.1.0: モード開始時に実際に非アクティブ化したパネルのスナップショット（復元対象。タブ選択状態と矛盾するパネルは復元しない）
+        private readonly List<UnityEngine.GameObject> _hiddenModePanels = new List<UnityEngine.GameObject>();
 
         // ファイル一覧
         private List<SceneItem> _items = new List<SceneItem>();
@@ -329,7 +332,12 @@ namespace KK_SceneExplorer
             else if (SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.Coordinate)
             {
                 // objRoot の非表示は MPCharCtrlOnClickRootPrefix で実施済み。ここはキャッシュ参照の維持確認のみ
-                if (_costumeRoot == null) _costumeRoot = ResolveCostumeRoot();
+                // （解決失敗時は毎フレーム再試行せず 0.5 秒間隔で再解決）
+                if (_costumeRoot == null && Time.time >= _nextCostumeResolveTime)
+                {
+                    _costumeRoot = ResolveCostumeRoot();
+                    _nextCostumeResolveTime = Time.time + 0.5f;
+                }
                 if (_costumeRoot != null && _costumeRoot.activeInHierarchy) _costumeRoot.SetActive(false);
             }
 
@@ -1445,24 +1453,41 @@ namespace KK_SceneExplorer
         }
 
         // v3.1.0: キャラ/衣装モード開始時に標準パネルを非表示にする（遷移検出時のみ呼ぶ）
+        // 実際に非アクティブ化したパネルのみ _hiddenModePanels に記録し、モード解除時の復元対象とする。
+        // モードが切り替わった場合（女→男等）は前モードのスナップショットを破棄して新たに記録する
+        // （前モードのパネルはタブ切替により元々非アクティブ化されるため復元対象から外す）。
         private void HideModePanels()
         {
+            _hiddenModePanels.Clear();
             foreach (var cl in SceneExplorerPlugin.activeCharaLists)
             {
-                if (cl != null && cl.gameObject.activeInHierarchy) cl.gameObject.SetActive(false);
+                if (cl != null && cl.gameObject.activeInHierarchy)
+                {
+                    cl.gameObject.SetActive(false);
+                    _hiddenModePanels.Add(cl.gameObject);
+                }
             }
             if (_costumeRoot == null) _costumeRoot = ResolveCostumeRoot();
-            if (_costumeRoot != null && _costumeRoot.activeInHierarchy) _costumeRoot.SetActive(false);
+            if (_costumeRoot != null && _costumeRoot.activeInHierarchy)
+            {
+                _costumeRoot.SetActive(false);
+                _hiddenModePanels.Add(_costumeRoot);
+            }
         }
 
         // v3.1.0: モード解除時に標準パネルを復元する（遷移検出時のみ呼ぶ）
+        // スナップショット（このモードで実際に隠したパネル）のみ復元し、元々非アクティブだった
+        // パネルには触れない（タブ選択状態を尊重）。モード開始時にアクティブだったパネルが
+        // タブ切替で非アクティブ化された場合も復元しない。
         private void RestoreStandardPanels()
         {
-            foreach (var cl in SceneExplorerPlugin.activeCharaLists)
+            // 破棄済み CharaList 参照を除去（スタジオシーン再ロード対策。Unity の == null オーバーロードで判定）
+            SceneExplorerPlugin.activeCharaLists.RemoveAll(l => l == null);
+            foreach (var go in _hiddenModePanels)
             {
-                if (cl != null && !cl.gameObject.activeInHierarchy) cl.gameObject.SetActive(true);
+                if (go != null && !go.activeInHierarchy) go.SetActive(true);
             }
-            if (_costumeRoot != null && !_costumeRoot.activeInHierarchy) _costumeRoot.SetActive(true);
+            _hiddenModePanels.Clear();
             _mpCharCtrl = null;   // 次回モード開始時に再解決させる
             _costumeRoot = null;
         }
