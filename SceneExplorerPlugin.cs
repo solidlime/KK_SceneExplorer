@@ -56,6 +56,44 @@ namespace KK_SceneExplorer
 		internal static bool applyingSelection;
 		internal static Studio.SceneLoadScene activeLoadScene;
 
+		/// <summary>ブラウザの操作対象モード（v3.1.0: キャラ/衣装対応）</summary>
+		public enum BrowserMode { Scene, CharaFemale, CharaMale, Coordinate }
+
+		internal static Studio.CharaList activeCharaList = null;   // 最後に Awake した CharaList（表示監視用。Task2 の CharaListAwakePostfix で代入）
+		internal static BrowserMode CurrentBrowserMode = BrowserMode.Scene;
+
+		/// <summary>モード対応のルートフォルダ。Scene は null（従来動作）。UserData.Path 基準</summary>
+		public static string GetModeRootFolder()
+		{
+			switch (CurrentBrowserMode)
+			{
+				case BrowserMode.CharaFemale: return "chara/female";
+				case BrowserMode.CharaMale:   return "chara/male";
+				case BrowserMode.Coordinate:  return "coordinate";
+				default: return null;
+			}
+		}
+
+		/// <summary>キャラモード要求。CharaList が active になった時に AddButtonCtrl.OnClick Postfix から呼ばれる</summary>
+		public static void RequestCharaMode(Studio.CharaList charaList)
+		{
+			if (charaList == null) return;
+			int sex = 1;
+			try { sex = (int)AccessTools.Field(typeof(Studio.CharaList), "sex").GetValue(charaList); }
+			catch (Exception ex) { Log.LogWarning("CharaList.sex 読取失敗: " + ex.Message); }
+			CurrentBrowserMode = (sex == 1) ? BrowserMode.CharaFemale : BrowserMode.CharaMale;
+			CurrentBrowserFolder = GetModeRootFolder();
+			Log.LogInfo("[SceneExplorer] Charaモード: " + CurrentBrowserMode + " folder=" + CurrentBrowserFolder);
+		}
+
+		/// <summary>シーンモードへ戻す。タブ切替・Close・OnClickRoot 他タブから呼ばれる</summary>
+		public static void RequestSceneMode(string reason)
+		{
+			if (CurrentBrowserMode != BrowserMode.Scene)
+				Log.LogInfo("[SceneExplorer] モード解除(" + reason + "): " + CurrentBrowserMode + " -> Scene");
+			CurrentBrowserMode = BrowserMode.Scene;
+		}
+
 		/// <summary>最後に押された追加タブ（0=女 / 1=男 / それ以外=未選択）。AddButtonCtrl.OnClick Postfix から記録。</summary>
 
 		/// <summary>v2.1.1: 終了確認（StudioExit）・確認ダイアログ（StudioCheck）シーン表示中フラグ。</summary>
