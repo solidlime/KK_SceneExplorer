@@ -1448,10 +1448,10 @@ namespace KK_SceneExplorer
                     int width = 0;
                     int height = 0;
                     Texture2D result = PngAssist.ChangeTextureFromPngByte(data, ref width, ref height);
-                    // v3.0.5: 読み込み時に明るさ補正を適用（1.18倍ゲイン）
+                    // v3.0.6: 読み込み時に明るさ・コントラスト補正を適用
                     if (result != null && result.width > 0 && result.height > 0)
                     {
-                        ApplyThumbnailBrightness(result, 1.18f);
+                        ApplyThumbnailBrightness(result, 1.08f, 0.90f);
                     }
                     return result;
                 }
@@ -1462,18 +1462,17 @@ namespace KK_SceneExplorer
             }
         }
 
-        // v3.0.5: サムネイルの明るさ補正。読み込み時に1回だけ適用。
-        private static void ApplyThumbnailBrightness(Texture2D tex, float gain)
+        // v3.0.6: サムネイルの明るさ・コントラスト補正。読み込み時に1回だけ適用。
+        private static void ApplyThumbnailBrightness(Texture2D tex, float gain, float contrast)
         {
             Color[] pixels = tex.GetPixels();
             for (int i = 0; i < pixels.Length; i++)
             {
                 Color c = pixels[i];
-                c.r = Mathf.Min(c.r * gain, 1f);
-                c.g = Mathf.Min(c.g * gain, 1f);
-                c.b = Mathf.Min(c.b * gain, 1f);
-                // a はそのまま
-                pixels[i] = c;
+                c.r = 0.5f + (Mathf.Min(c.r * gain, 1f) - 0.5f) * contrast;
+                c.g = 0.5f + (Mathf.Min(c.g * gain, 1f) - 0.5f) * contrast;
+                c.b = 0.5f + (Mathf.Min(c.b * gain, 1f) - 0.5f) * contrast;
+                pixels[i] = new Color(Mathf.Clamp01(c.r), Mathf.Clamp01(c.g), Mathf.Clamp01(c.b), c.a);
             }
             tex.SetPixels(pixels);
             tex.Apply(false);

@@ -28,7 +28,7 @@ namespace KK_SceneExplorer
 	public class SceneExplorerPlugin : BaseUnityPlugin
 	{
 		public const string GUID = "KK_SceneExplorer";
-		public const string Version = "3.0.5";
+		public const string Version = "3.0.6";
 
 		public static Harmony HarmonyInstance;
 		public static bool kkccDetected;
