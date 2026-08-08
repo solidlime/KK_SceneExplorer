@@ -73,6 +73,8 @@ namespace KK_SceneExplorer
         private static Texture2D _titleBarTex;
         private static Texture2D _windowBgTex;
         private static Texture2D _clearTex;
+        private static Texture2D _scrollbarTrackTex;
+        private static Texture2D _scrollbarThumbTex;
 
         // ── v2.0.6 GUIClipリーク対策 ──
         private static Type _clipType;
@@ -190,11 +192,11 @@ namespace KK_SceneExplorer
             _hoverItemTex.Apply();
 
             _emptyThumbTex = new Texture2D(1, 1);
-            _emptyThumbTex.SetPixel(0, 0, new Color(0.15f, 0.15f, 0.15f, 1f));
+            _emptyThumbTex.SetPixel(0, 0, new Color(0.22f, 0.22f, 0.23f, 1f));
             _emptyThumbTex.Apply();
 
             _tooltipBgTex = new Texture2D(1, 1);
-            _tooltipBgTex.SetPixel(0, 0, new Color(0.1f, 0.1f, 0.1f, 0.95f));
+            _tooltipBgTex.SetPixel(0, 0, new Color(0.14f, 0.14f, 0.15f, 0.95f));
             _tooltipBgTex.Apply();
 
             _resizeHandleTex = new Texture2D(1, 1);
@@ -206,15 +208,24 @@ namespace KK_SceneExplorer
             _titleBarTex.SetPixel(0, 0, new Color(0.16f, 0.16f, 0.16f, 1f));
             _titleBarTex.Apply();
 
-            // v3.0.2: ウィンドウ背景（10%透過。背後がうっすら見える程度）
+            // v3.0.3: ウィンドウ背景（0.18グレー。黒一色の印象を解消）
             _windowBgTex = new Texture2D(1, 1);
-            _windowBgTex.SetPixel(0, 0, new Color(0.11f, 0.11f, 0.11f, 0.90f));
+            _windowBgTex.SetPixel(0, 0, new Color(0.18f, 0.18f, 0.19f, 0.92f));
             _windowBgTex.Apply();
 
             // v2.6.0: モーダル用透明テクスチャ（クリック吸収レイヤーに使用）
             _clearTex = new Texture2D(1, 1);
             _clearTex.SetPixel(0, 0, new Color(0, 0, 0, 0));
             _clearTex.Apply();
+
+            // v3.0.3: スクロールバー用テクスチャ（背景と同化しないよう明るめに）
+            _scrollbarTrackTex = new Texture2D(1, 1);
+            _scrollbarTrackTex.SetPixel(0, 0, new Color(0.15f, 0.15f, 0.16f, 1f));
+            _scrollbarTrackTex.Apply();
+
+            _scrollbarThumbTex = new Texture2D(1, 1);
+            _scrollbarThumbTex.SetPixel(0, 0, new Color(0.40f, 0.45f, 0.55f, 1f));
+            _scrollbarThumbTex.Apply();
 
             // 保存済みウィンドウサイズを読み込み
             _lastSavedWidth = (float)SceneExplorerPlugin.BrowserWidth.Value;
@@ -458,6 +469,8 @@ namespace KK_SceneExplorer
             if (_titleBarTex != null) Destroy(_titleBarTex);
             if (_windowBgTex != null) Destroy(_windowBgTex);
             if (_clearTex != null) Destroy(_clearTex);
+            if (_scrollbarTrackTex != null) Destroy(_scrollbarTrackTex);
+            if (_scrollbarThumbTex != null) Destroy(_scrollbarThumbTex);
             ClearThumbnailCache();
             SaveWindowSize();
         }
@@ -510,7 +523,7 @@ namespace KK_SceneExplorer
             _selectedItemStyle.padding = new RectOffset(2, 2, 0, 0);
 
             _dateStyle = new GUIStyle(skin.label);
-            _dateStyle.normal.textColor = new Color(0.6f, 0.6f, 0.6f);
+            _dateStyle.normal.textColor = new Color(0.68f, 0.68f, 0.68f);
             _dateStyle.fontSize = fs;
             _dateStyle.alignment = TextAnchor.UpperCenter;
 
@@ -542,7 +555,7 @@ namespace KK_SceneExplorer
             // v2.5.3: カスタムタイトルバースタイル
             _titleBarStyle = new GUIStyle(skin.label);
             _titleBarStyle.normal.background = _titleBarTex;
-            _titleBarStyle.normal.textColor = new Color(0.85f, 0.85f, 0.85f);
+            _titleBarStyle.normal.textColor = new Color(0.88f, 0.88f, 0.88f);
             _titleBarStyle.fontSize = fs;
             _titleBarStyle.alignment = TextAnchor.MiddleLeft;
             _titleBarStyle.padding = new RectOffset(8, 8, 4, 4);
@@ -792,6 +805,7 @@ namespace KK_SceneExplorer
             GUILayout.EndHorizontal();
 
             // ツリースクロール
+            ApplyScrollbarSkin();
             _treeScroll = GUILayout.BeginScrollView(_treeScroll);
 
             // ルート群: ローカルルート + 設定されたネットワークフォルダを同じ深さ(0)で並べて描画
@@ -829,6 +843,7 @@ namespace KK_SceneExplorer
             }
 
             GUILayout.EndScrollView();
+            RestoreScrollbarSkin();
             GUILayout.EndArea();
         }
 
@@ -974,6 +989,7 @@ namespace KK_SceneExplorer
             Rect viewRect = new Rect(panelRect.x, panelRect.y, panelRect.width, panelRect.height);
             Rect contentRect = new Rect(0, 0, gridTotalW, contentH);
 
+            ApplyScrollbarSkin();
             _gridScroll = GUI.BeginScrollView(viewRect, _gridScroll, contentRect);
 
             int itemIndex = 0;
@@ -989,6 +1005,7 @@ namespace KK_SceneExplorer
             }
 
             GUI.EndScrollView();
+            RestoreScrollbarSkin();
         }
 
         private void DrawGridItem(Rect rect, int index)
@@ -1012,6 +1029,11 @@ namespace KK_SceneExplorer
             float thumbX = rect.x + (rect.width - _thumbSize) / 2f;
             float thumbY = rect.y + ItemPadY;
             var thumbRect = new Rect(thumbX, thumbY, _thumbSize, _thumbSize);
+            // v3.0.3: サムネイル背景パネル（暗いサムネでも背景に溶けないように）
+            if (Event.current.type == EventType.Repaint)
+            {
+                GUI.DrawTexture(thumbRect, _emptyThumbTex, ScaleMode.StretchToFill);
+            }
             Texture2D tex = GetThumbnail(item);
             if (tex != null)
             {
@@ -1094,6 +1116,56 @@ namespace KK_SceneExplorer
 
             Rect finalRect = new Rect(tx, ty, tw, th);
             GUI.Label(finalRect, _tooltipText, _tooltipStyle);
+        }
+
+        // ═══════════════════════════════════════════════════════
+        // スクロールバー用カスタムスキン管理（v3.0.3）
+        // GUI.skin を永続的に汚さないよう、一時差替＋即復元する。
+        // ═══════════════════════════════════════════════════════
+
+        private GUIStyle _scrollTrackStyle;
+        private GUIStyle _scrollThumbStyle;
+        private GUIStyle _origScrollbar;
+        private GUIStyle _origScrollbarThumb;
+        private GUIStyle _origHScrollbar;
+        private GUIStyle _origHScrollbarThumb;
+
+        private void ApplyScrollbarSkin()
+        {
+            if (_scrollTrackStyle == null)
+            {
+                _scrollTrackStyle = new GUIStyle(GUI.skin.verticalScrollbar);
+                _scrollTrackStyle.normal.background = _scrollbarTrackTex;
+                _scrollTrackStyle.fixedWidth = 14f;
+            }
+            if (_scrollThumbStyle == null)
+            {
+                _scrollThumbStyle = new GUIStyle(GUI.skin.verticalScrollbarThumb);
+                _scrollThumbStyle.normal.background = _scrollbarThumbTex;
+                _scrollThumbStyle.fixedWidth = 14f;
+                _scrollThumbStyle.contentOffset = Vector2.zero;
+            }
+            // 既存スキンのスクロールバーだけ一時的に差替（他のスタイルは汚さない）
+            _origScrollbar = GUI.skin.verticalScrollbar;
+            _origScrollbarThumb = GUI.skin.verticalScrollbarThumb;
+            _origHScrollbar = GUI.skin.horizontalScrollbar;
+            _origHScrollbarThumb = GUI.skin.horizontalScrollbarThumb;
+            GUI.skin.verticalScrollbar = _scrollTrackStyle;
+            GUI.skin.verticalScrollbarThumb = _scrollThumbStyle;
+            GUI.skin.horizontalScrollbar = _scrollTrackStyle;
+            GUI.skin.horizontalScrollbarThumb = _scrollThumbStyle;
+        }
+
+        private void RestoreScrollbarSkin()
+        {
+            if (_origScrollbar != null)
+            {
+                GUI.skin.verticalScrollbar = _origScrollbar;
+                GUI.skin.verticalScrollbarThumb = _origScrollbarThumb;
+                GUI.skin.horizontalScrollbar = _origHScrollbar;
+                GUI.skin.horizontalScrollbarThumb = _origHScrollbarThumb;
+                _origScrollbar = null;
+            }
         }
 
         // ═══════════════════════════════════════════════════════
