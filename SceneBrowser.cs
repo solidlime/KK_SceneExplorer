@@ -1021,7 +1021,10 @@ namespace KK_SceneExplorer
 
             // グリッド計算
             float cellW = _thumbSize + ItemPadX * 2;
-            float cellH = _thumbSize + TextLineHeight * 3 + ItemPadY * 2 + ItemGap;
+            // サムネを16:9化してテキストまでの縦隙間を削減（シーンサムネは320x180固定）
+            float thumbW = _thumbSize - 8f;                 // 左右4px余白
+            float thumbH = thumbW * 9f / 16f;               // 16:9
+            float cellH = thumbH + TextLineHeight * 3 + ItemPadY * 2 + 2f;  // テキスト直下の隙間は2px
             int cols = Mathf.Max(1, Mathf.FloorToInt((panelRect.width - 16) / (cellW + ItemSpacing)));
             float gridTotalW = cols * (cellW + ItemSpacing) - ItemSpacing;
             float offsetX = (panelRect.width - gridTotalW) / 2f;
@@ -1077,10 +1080,12 @@ namespace KK_SceneExplorer
                 GUI.DrawTexture(rect, _hoverItemTex, ScaleMode.StretchToFill);
             }
 
-            // サムネイル
-            float thumbX = rect.x + (rect.width - _thumbSize) / 2f;
+            // サムネイル（16:9。ScaleMode.ScaleToFit のため16:9以外のサムネも収まる）
+            float thumbW = rect.width - 8f;
+            float thumbH = thumbW * 9f / 16f;
+            float thumbX = rect.x + 4f;
             float thumbY = rect.y + ItemPadY;
-            var thumbRect = new Rect(thumbX, thumbY, _thumbSize, _thumbSize);
+            var thumbRect = new Rect(thumbX, thumbY, thumbW, thumbH);
             Texture2D tex = GetThumbnail(item);
             if (tex != null)
             {
@@ -1099,8 +1104,8 @@ namespace KK_SceneExplorer
                 GUI.Label(thumbRect, "\u2609", _pageLabelStyle); // ☉ プレースホルダー
             }
 
-            // ファイル名
-            float textY = thumbRect.yMax + ItemGap;
+            // ファイル名（サムネ直下は2pxの隙間）
+            float textY = thumbRect.yMax + 2f;
             var nameRect = new Rect(rect.x + 2, textY, rect.width - 4, TextLineHeight);
             GUI.Label(nameRect, item.FileName, _selectedItemStyle);
 
