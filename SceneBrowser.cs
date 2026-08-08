@@ -89,6 +89,7 @@ namespace KK_SceneExplorer
         private bool _visible;
         private bool _eventSystemLocked;              // 現在 EventSystem を無効化中か
         private bool _prevEventSystemEnabled = true;  // 無効化前の元の状態
+        private UnityEngine.EventSystems.EventSystem _lockedEventSystem; // 無効化した EventSystem の参照（current は無効化で null になるため保持が必要）
         private bool _loading;
         private float _nextCheckTime;
         private bool _stylesReady;
@@ -274,14 +275,16 @@ namespace KK_SceneExplorer
                 if (es != null)
                 {
                     _prevEventSystemEnabled = es.enabled;
+                    _lockedEventSystem = es;   // current は無効化（OnDisable）で null になるため参照を保持
                     es.enabled = false;
                     _eventSystemLocked = true;
                 }
             }
             else if (!_visible && _eventSystemLocked)
             {
-                var es = UnityEngine.EventSystems.EventSystem.current;
-                if (es != null) es.enabled = _prevEventSystemEnabled;
+                // 保持した参照から直接復元（EventSystem.current は無効化中は null のため使えない）
+                if (_lockedEventSystem != null) _lockedEventSystem.enabled = _prevEventSystemEnabled;
+                _lockedEventSystem = null;
                 _eventSystemLocked = false;
             }
 
@@ -510,8 +513,8 @@ namespace KK_SceneExplorer
             // 表示中に破棄された場合の安全策: EventSystem を元の状態に復元
             if (_eventSystemLocked)
             {
-                var es = UnityEngine.EventSystems.EventSystem.current;
-                if (es != null) es.enabled = _prevEventSystemEnabled;
+                if (_lockedEventSystem != null) _lockedEventSystem.enabled = _prevEventSystemEnabled;
+                _lockedEventSystem = null;
                 _eventSystemLocked = false;
             }
             if (_selectedRowTex != null) Destroy(_selectedRowTex);
