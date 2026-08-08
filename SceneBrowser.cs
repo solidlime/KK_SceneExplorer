@@ -1445,11 +1445,13 @@ namespace KK_SceneExplorer
                     }
                     if (totalRead < pngSize) return null;
 
-                    int width = 0;
-                    int height = 0;
-                    Texture2D result = PngAssist.ChangeTextureFromPngByte(data, ref width, ref height);
+                    // v3.0.9: PngAssist ではなく Unity 標準の LoadImage で直接読み込む（デコードが暗い問題の切り分け）
+                    Texture2D result = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                    if (!result.LoadImage(data)) return null;
+                    // v3.0.9: デバッグ — 読み込み後テクスチャの平均輝度をログ出力（原因切り分け用）
+                    LogThumbnailBrightness(path, result);
                     // v3.0.8: 読み込み時にガンマ・コントラスト補正を適用（Config設定値）
-                    if (result != null && result.width > 0 && result.height > 0)
+                    if (result.width > 0 && result.height > 0)
                     {
                         ApplyThumbnailBrightness(result, SceneExplorerPlugin.ThumbGamma.Value, SceneExplorerPlugin.ThumbContrast.Value);
                     }
@@ -1481,6 +1483,29 @@ namespace KK_SceneExplorer
             }
             tex.SetPixels(pixels);
             tex.Apply(false);
+        }
+
+        // v3.0.9: デバッグ用 — 読み込み後テクスチャの平均輝度をログ出力（初回読み込みのみ。原因切り分け用）
+        private static bool brightnessLogged;
+        private static void LogThumbnailBrightness(string path, Texture2D tex)
+        {
+            if (brightnessLogged) return;
+            brightnessLogged = true;
+            try
+            {
+                Color[] px = tex.GetPixels();
+                float avg = 0f;
+                for (int i = 0; i < px.Length; i++)
+                {
+                    avg += 0.2126f * px[i].r + 0.7152f * px[i].g + 0.0722f * px[i].b;
+                }
+                avg /= Mathf.Max(px.Length, 1);
+                SceneExplorerPlugin.Log.LogWarning("[v3.0.9 Debug] サムネ読み込み後: " + Path.GetFileName(path) + " 平均輝度=" + avg.ToString("F3") + " (" + tex.width + "x" + tex.height + ")");
+            }
+            catch (Exception ex)
+            {
+                SceneExplorerPlugin.Log.LogWarning("[v3.0.9 Debug] 輝度計測失敗: " + ex.Message);
+            }
         }
 
         private void AddToThumbnailCache(string path, Texture2D tex)
