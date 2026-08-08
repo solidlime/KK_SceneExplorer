@@ -68,6 +68,7 @@ namespace KK_SceneExplorer
         private static Texture2D _selectedItemTex;
         private static Texture2D _hoverItemTex;
         private static Texture2D _emptyThumbTex;
+        private static Texture2D _thumbPanelTex;
         private static Texture2D _tooltipBgTex;
         private static Texture2D _resizeHandleTex;
         private static Texture2D _titleBarTex;
@@ -180,7 +181,7 @@ namespace KK_SceneExplorer
             _hoverRowTex.Apply();
 
             _splitterTex = new Texture2D(1, 1);
-            _splitterTex.SetPixel(0, 0, new Color(0.35f, 0.35f, 0.35f, 1f));
+            _splitterTex.SetPixel(0, 0, new Color(0.30f, 0.35f, 0.45f, 1f));
             _splitterTex.Apply();
 
             _selectedItemTex = new Texture2D(1, 1);
@@ -192,25 +193,30 @@ namespace KK_SceneExplorer
             _hoverItemTex.Apply();
 
             _emptyThumbTex = new Texture2D(1, 1);
-            _emptyThumbTex.SetPixel(0, 0, new Color(0.22f, 0.22f, 0.23f, 1f));
+            _emptyThumbTex.SetPixel(0, 0, new Color(0.94f, 0.94f, 0.96f, 1f));
             _emptyThumbTex.Apply();
 
+            // v3.0.4: サムネイル背景パネル（白系。暗いサムネを浮き立たせる）
+            _thumbPanelTex = new Texture2D(1, 1);
+            _thumbPanelTex.SetPixel(0, 0, new Color(0.94f, 0.94f, 0.96f, 1f));
+            _thumbPanelTex.Apply();
+
             _tooltipBgTex = new Texture2D(1, 1);
-            _tooltipBgTex.SetPixel(0, 0, new Color(0.14f, 0.14f, 0.15f, 0.95f));
+            _tooltipBgTex.SetPixel(0, 0, new Color(0.10f, 0.13f, 0.20f, 0.95f));
             _tooltipBgTex.Apply();
 
             _resizeHandleTex = new Texture2D(1, 1);
-            _resizeHandleTex.SetPixel(0, 0, new Color(0.45f, 0.45f, 0.45f, 0.8f));
+            _resizeHandleTex.SetPixel(0, 0, new Color(0.40f, 0.45f, 0.55f, 0.8f));
             _resizeHandleTex.Apply();
 
             // v2.5.3: カスタムタイトルバー背景（Unity標準タイトルバーの代わりに描画）
             _titleBarTex = new Texture2D(1, 1);
-            _titleBarTex.SetPixel(0, 0, new Color(0.16f, 0.16f, 0.16f, 1f));
+            _titleBarTex.SetPixel(0, 0, new Color(0.10f, 0.14f, 0.22f, 1f));
             _titleBarTex.Apply();
 
-            // v3.0.3: ウィンドウ背景（0.18グレー。黒一色の印象を解消）
+            // v3.0.4: ウィンドウ背景（ダークブルー。青みがかった黒で統一）
             _windowBgTex = new Texture2D(1, 1);
-            _windowBgTex.SetPixel(0, 0, new Color(0.18f, 0.18f, 0.19f, 0.92f));
+            _windowBgTex.SetPixel(0, 0, new Color(0.13f, 0.16f, 0.24f, 0.93f));
             _windowBgTex.Apply();
 
             // v2.6.0: モーダル用透明テクスチャ（クリック吸収レイヤーに使用）
@@ -464,6 +470,7 @@ namespace KK_SceneExplorer
             if (_selectedItemTex != null) Destroy(_selectedItemTex);
             if (_hoverItemTex != null) Destroy(_hoverItemTex);
             if (_emptyThumbTex != null) Destroy(_emptyThumbTex);
+            if (_thumbPanelTex != null) Destroy(_thumbPanelTex);
             if (_tooltipBgTex != null) Destroy(_tooltipBgTex);
             if (_resizeHandleTex != null) Destroy(_resizeHandleTex);
             if (_titleBarTex != null) Destroy(_titleBarTex);
@@ -502,11 +509,11 @@ namespace KK_SceneExplorer
             int fs = SceneExplorerPlugin.FontSize.Value;
 
             _nodeButtonStyle = new GUIStyle(skin.label);
-            _nodeButtonStyle.normal.textColor = new Color(0.88f, 0.88f, 0.88f);
+            _nodeButtonStyle.normal.textColor = new Color(0.88f, 0.89f, 0.92f);
             _nodeButtonStyle.onNormal.background = _selectedRowTex;
             _nodeButtonStyle.onNormal.textColor = Color.white;
-            _nodeButtonStyle.hover.textColor = new Color(0.6f, 0.8f, 1.0f);
-            _nodeButtonStyle.focused.textColor = new Color(0.6f, 0.8f, 1.0f);
+            _nodeButtonStyle.hover.textColor = new Color(0.55f, 0.75f, 1.0f);
+            _nodeButtonStyle.focused.textColor = new Color(0.55f, 0.75f, 1.0f);
             _nodeButtonStyle.fontSize = fs;
             _nodeButtonStyle.alignment = TextAnchor.MiddleLeft;
             _nodeButtonStyle.padding = new RectOffset(4, 4, 2, 2);
@@ -523,7 +530,7 @@ namespace KK_SceneExplorer
             _selectedItemStyle.padding = new RectOffset(2, 2, 0, 0);
 
             _dateStyle = new GUIStyle(skin.label);
-            _dateStyle.normal.textColor = new Color(0.68f, 0.68f, 0.68f);
+            _dateStyle.normal.textColor = new Color(0.72f, 0.74f, 0.78f);
             _dateStyle.fontSize = fs;
             _dateStyle.alignment = TextAnchor.UpperCenter;
 
@@ -533,7 +540,7 @@ namespace KK_SceneExplorer
             _toolbarButtonStyle.fixedHeight = ButtonHeight;
 
             _pageLabelStyle = new GUIStyle(skin.label);
-            _pageLabelStyle.normal.textColor = new Color(0.85f, 0.85f, 0.85f);
+            _pageLabelStyle.normal.textColor = new Color(0.88f, 0.89f, 0.92f);
             _pageLabelStyle.alignment = TextAnchor.MiddleCenter;
             _pageLabelStyle.fontSize = fs;
 
@@ -548,14 +555,14 @@ namespace KK_SceneExplorer
             _splitterStyle.normal.background = _splitterTex;
 
             _countLabelStyle = new GUIStyle(skin.label);
-            _countLabelStyle.normal.textColor = new Color(0.75f, 0.75f, 0.75f);
+            _countLabelStyle.normal.textColor = new Color(0.72f, 0.74f, 0.78f);
             _countLabelStyle.alignment = TextAnchor.MiddleLeft;
             _countLabelStyle.fontSize = fs;
 
             // v2.5.3: カスタムタイトルバースタイル
             _titleBarStyle = new GUIStyle(skin.label);
             _titleBarStyle.normal.background = _titleBarTex;
-            _titleBarStyle.normal.textColor = new Color(0.88f, 0.88f, 0.88f);
+            _titleBarStyle.normal.textColor = new Color(0.88f, 0.89f, 0.92f);
             _titleBarStyle.fontSize = fs;
             _titleBarStyle.alignment = TextAnchor.MiddleLeft;
             _titleBarStyle.padding = new RectOffset(8, 8, 4, 4);
@@ -610,7 +617,7 @@ namespace KK_SceneExplorer
                 var rh = new Rect(fullRect.xMax - ResizeHandleSize, fullRect.yMax - ResizeHandleSize, ResizeHandleSize, ResizeHandleSize);
                 GUI.DrawTexture(rh, _resizeHandleTex);
                 // 三角形風のインジケータ
-                GUI.color = new Color(0.6f, 0.6f, 0.6f);
+                GUI.color = new Color(0.55f, 0.60f, 0.68f);
                 for (int i = 0; i < 4; i++)
                 {
                     float ofs = 2 + i * 3;
@@ -873,7 +880,7 @@ namespace KK_SceneExplorer
             float treeX = lineRect.x + indent * IndentPerLevel + ToggleWidth;
             if (indent > 0)
             {
-                GUI.color = new Color(0.45f, 0.45f, 0.45f);
+                GUI.color = new Color(0.38f, 0.42f, 0.52f);
                 DrawBranchLines(lineRect, indent, treeX, isLast);
                 GUI.color = Color.white;
             }
@@ -1029,10 +1036,10 @@ namespace KK_SceneExplorer
             float thumbX = rect.x + (rect.width - _thumbSize) / 2f;
             float thumbY = rect.y + ItemPadY;
             var thumbRect = new Rect(thumbX, thumbY, _thumbSize, _thumbSize);
-            // v3.0.3: サムネイル背景パネル（暗いサムネでも背景に溶けないように）
+            // v3.0.4: サムネイル背景パネル（白系。暗いサムネを浮き立たせる）
             if (Event.current.type == EventType.Repaint)
             {
-                GUI.DrawTexture(thumbRect, _emptyThumbTex, ScaleMode.StretchToFill);
+                GUI.DrawTexture(thumbRect, _thumbPanelTex, ScaleMode.StretchToFill);
             }
             Texture2D tex = GetThumbnail(item);
             if (tex != null)
