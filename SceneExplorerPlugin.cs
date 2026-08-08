@@ -682,7 +682,21 @@ namespace KK_SceneExplorer
 				else
 				{
 					Log.LogWarning("パッチ失敗: Studio.SceneInfo.Save");
-				}			}
+				}
+				// v3.1.0: キャラ/衣装ブラウザ
+				MethodInfo t7 = AccessTools.Method(typeof(Studio.CharaList), "Awake");
+				if (t7 != null)
+				{
+					harmony.Patch(t7, postfix: new HarmonyMethod(AccessTools.Method(typeof(Patches), nameof(CharaListAwakePostfix))));
+					Log.LogInfo("パッチ適用: Studio.CharaList.Awake");
+				}
+				MethodInfo t8 = AccessTools.Method(typeof(Studio.AddButtonCtrl), "OnClick");
+				if (t8 != null)
+				{
+					harmony.Patch(t8, postfix: new HarmonyMethod(AccessTools.Method(typeof(Patches), nameof(AddButtonOnClickPostfix))));
+					Log.LogInfo("パッチ適用: Studio.AddButtonCtrl.OnClick");
+				}
+			}
 
 			private static IEnumerable<CodeInstruction> InitInfoTranspiler(IEnumerable<CodeInstruction> instructions)
 			{
@@ -835,6 +849,27 @@ namespace KK_SceneExplorer
 				else
 				{
 					TransferNow(_path, dest);
+				}
+			}
+
+			// v3.1.0: CharaList のインスタンスを保持（Awake はスタジオ起動時に一度だけ呼ばれる）
+			private static void CharaListAwakePostfix(Studio.CharaList __instance)
+			{
+				SceneExplorerPlugin.activeCharaList = __instance;
+			}
+
+			// v3.1.0: タブ切替後、CharaList が表示状態になったらキャラモード開始（排他制御なので他タブなら自動で非表示になる）
+			private static void AddButtonOnClickPostfix()
+			{
+				var list = SceneExplorerPlugin.activeCharaList;
+				if (list == null) return;
+				if (list.gameObject.activeInHierarchy)
+				{
+					SceneExplorerPlugin.RequestCharaMode(list);
+				}
+				else if (SceneExplorerPlugin.CurrentBrowserMode != BrowserMode.Scene)
+				{
+					SceneExplorerPlugin.RequestSceneMode("タブ切替");
 				}
 			}
 

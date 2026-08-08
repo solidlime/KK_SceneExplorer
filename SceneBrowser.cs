@@ -288,6 +288,16 @@ namespace KK_SceneExplorer
                 _eventSystemLocked = false;
             }
 
+            // v3.1.0: キャラモード中は CharaList パネルを非表示にして SceneBrowser に差し替える
+            var cl = SceneExplorerPlugin.activeCharaList;
+            bool wantChara = SceneExplorerPlugin.CurrentBrowserMode != SceneExplorerPlugin.BrowserMode.Scene &&
+                             SceneExplorerPlugin.CurrentBrowserMode != SceneExplorerPlugin.BrowserMode.Coordinate;
+            if (wantChara && cl != null && cl.gameObject.activeInHierarchy)
+            {
+                cl.gameObject.SetActive(false);
+                if (!_visible) _visible = true;   // ShouldBeVisible は CurrentBrowserMode 基準に拡張される（Task 4）
+            }
+
             if (_loading) return;
             if (Time.time < _nextCheckTime) return;
             _nextCheckTime = Time.time + CheckInterval;
