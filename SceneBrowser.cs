@@ -862,54 +862,84 @@ namespace KK_SceneExplorer
 
             GUILayout.FlexibleSpace();
 
-            // v2.5.4: ボタン幅をFlexibleWidth化（ウィンドウ幅に応じて均等スケール）。ラベル英語化。
-            // v3.1.0: キャラ/衣装モードでは Load のラベルを「追加」に変更
-            string loadLabel = SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.Scene
-                ? "Load"
-                : "\u8ffd\u52a0"; // 追加
-            GUI.enabled = _selectedIndex >= 0;
-            if (GUILayout.Button(loadLabel, _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
-            {
-                LoadSelected();
-            }
-            GUI.enabled = true;
+            bool charaMode = SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.CharaFemale ||
+                             SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.CharaMale;
 
-            // v3.1.0: Import/Delete はシーンモードのみ表示（キャラ/衣装モードでは対象外の操作）
-            if (SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.Scene)
+            // v3.2.1: キャラモードは [Add][Replace] の明示分離（Add = 常に追加 / Replace = 常に置き換え）
+            if (charaMode)
             {
+                int sex = (SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.CharaFemale) ? 1 : 0;
+
                 GUI.enabled = _selectedIndex >= 0;
-                if (GUILayout.Button("Import", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
+                if (GUILayout.Button("Add", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
                 {
-                    ImportSelected();
+                    if (_selectedIndex >= 0 && _selectedIndex < _items.Count)
+                        AddSelected(_items[_selectedIndex].FilePath, sex);
                 }
                 GUI.enabled = true;
 
-                // デリート（二段階確認）
-                if (_deleteConfirm)
+                // Replace は選択オブジェクトが無いとき無効化（OCIChar 判定はクリック時。Count のみ毎フレーム判定）
+                var gom = Singleton<Studio.GuideObjectManager>.Instance;
+                bool hasSelection = gom != null && gom.selectObjectKey != null && gom.selectObjectKey.Count() > 0;
+                GUI.enabled = _selectedIndex >= 0 && hasSelection;
+                if (GUILayout.Button("Replace", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
                 {
-                    if (Time.time - _deleteConfirmTime > DeleteResetSeconds)
-                    {
-                        _deleteConfirm = false;
-                    }
-                    GUI.backgroundColor = new Color(0.9f, 0.2f, 0.2f);
-                    GUI.enabled = _selectedIndex >= 0;
-                    if (GUILayout.Button("Delete?", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
-                    {
-                        DeleteSelected();
-                        _deleteConfirm = false;
-                    }
-                    GUI.enabled = true;
-                    GUI.backgroundColor = Color.white;
+                    if (_selectedIndex >= 0 && _selectedIndex < _items.Count)
+                        ReplaceSelected(_items[_selectedIndex].FilePath, sex);
                 }
-                else
+                GUI.enabled = true;
+            }
+            else
+            {
+                // v2.5.4: ボタン幅をFlexibleWidth化（ウィンドウ幅に応じて均等スケール）。ラベル英語化。
+                // v3.1.0: 衣装モードでは Load のラベルを「追加」に変更（キャラモードは上記の Add/Replace に置き換え）
+                string loadLabel = SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.Scene
+                    ? "Load"
+                    : "\u8ffd\u52a0"; // 追加
+                GUI.enabled = _selectedIndex >= 0;
+                if (GUILayout.Button(loadLabel, _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
+                {
+                    LoadSelected();
+                }
+                GUI.enabled = true;
+
+                // v3.1.0: Import/Delete はシーンモードのみ表示（キャラ/衣装モードでは対象外の操作）
+                if (SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.Scene)
                 {
                     GUI.enabled = _selectedIndex >= 0;
-                    if (GUILayout.Button("Delete", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
+                    if (GUILayout.Button("Import", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
                     {
-                        _deleteConfirm = true;
-                        _deleteConfirmTime = Time.time;
+                        ImportSelected();
                     }
                     GUI.enabled = true;
+
+                    // デリート（二段階確認）
+                    if (_deleteConfirm)
+                    {
+                        if (Time.time - _deleteConfirmTime > DeleteResetSeconds)
+                        {
+                            _deleteConfirm = false;
+                        }
+                        GUI.backgroundColor = new Color(0.9f, 0.2f, 0.2f);
+                        GUI.enabled = _selectedIndex >= 0;
+                        if (GUILayout.Button("Delete?", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
+                        {
+                            DeleteSelected();
+                            _deleteConfirm = false;
+                        }
+                        GUI.enabled = true;
+                        GUI.backgroundColor = Color.white;
+                    }
+                    else
+                    {
+                        GUI.enabled = _selectedIndex >= 0;
+                        if (GUILayout.Button("Delete", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
+                        {
+                            _deleteConfirm = true;
+                            _deleteConfirmTime = Time.time;
+                        }
+                        GUI.enabled = true;
+                    }
                 }
             }
 
@@ -1399,24 +1429,7 @@ namespace KK_SceneExplorer
         // GuideObjectManager が未初期化等の場合は従来の追加にフォールバックする。
         private void AddOrReplaceChara(string path, int sex)
         {
-            Studio.OCIChar[] targets = null;
-            try
-            {
-                var gom = Singleton<Studio.GuideObjectManager>.Instance;
-                if (gom != null && gom.selectObjectKey != null)
-                {
-                    targets = (from v in gom.selectObjectKey
-                               select Studio.Studio.GetCtrlInfo(v) as Studio.OCIChar into v
-                               where v != null
-                               where v.oiCharInfo.sex == sex
-                               select v).ToArray();
-                }
-            }
-            catch (Exception ex)
-            {
-                SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] 選択キャラ収集に失敗: " + ex.Message);
-                targets = null;   // フォールバック: 追加に落とす
-            }
+            Studio.OCIChar[] targets = CollectSameSexChara(sex);
 
             if (targets != null && targets.Length > 0)
             {
@@ -1434,6 +1447,52 @@ namespace KK_SceneExplorer
             {
                 Studio.Studio.Instance.AddMale(path);
             }
+        }
+
+        // v3.2.1: 選択中の同性別 OCIChar を収集する（標準 CharaList と同一方式。失敗時は null）
+        private Studio.OCIChar[] CollectSameSexChara(int sex)
+        {
+            try
+            {
+                var gom = Singleton<Studio.GuideObjectManager>.Instance;
+                if (gom == null || gom.selectObjectKey == null) return null;
+                return (from v in gom.selectObjectKey
+                        select Studio.Studio.GetCtrlInfo(v) as Studio.OCIChar into v
+                        where v != null
+                        where v.oiCharInfo.sex == sex
+                        select v).ToArray();
+            }
+            catch (Exception ex)
+            {
+                SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] 選択キャラ収集に失敗: " + ex.Message);
+                return null;
+            }
+        }
+
+        // v3.2.1: 常に追加（ボトムバーの Add ボタン用）
+        private void AddSelected(string path, int sex)
+        {
+            if (sex == 1)
+                Studio.Studio.Instance.AddFemale(path);
+            else
+                Studio.Studio.Instance.AddMale(path);
+            SceneExplorerPlugin.Log.LogInfo("[SceneBrowser] キャラ追加: " + path);
+        }
+
+        // v3.2.1: 常に置き換え（ボトムバーの Replace ボタン用。同性別キャラ未選択なら警告のみ）
+        private void ReplaceSelected(string path, int sex)
+        {
+            Studio.OCIChar[] targets = CollectSameSexChara(sex);
+            if (targets == null || targets.Length == 0)
+            {
+                SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] Replace: シーン内で同性別キャラクターを選択してください");
+                return;
+            }
+            for (int i = 0; i < targets.Length; i++)
+            {
+                targets[i].ChangeChara(path);
+            }
+            SceneExplorerPlugin.Log.LogInfo("[SceneBrowser] キャラ置き換え: " + path + " x" + targets.Length);
         }
 
         // v3.1.0: 選択中キャラに衣装を適用（未選択なら何もしない）
