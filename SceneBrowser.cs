@@ -68,7 +68,6 @@ namespace KK_SceneExplorer
         private static Texture2D _selectedItemTex;
         private static Texture2D _hoverItemTex;
         private static Texture2D _emptyThumbTex;
-        private static Texture2D _thumbPanelTex;
         private static Texture2D _tooltipBgTex;
         private static Texture2D _resizeHandleTex;
         private static Texture2D _titleBarTex;
@@ -197,10 +196,7 @@ namespace KK_SceneExplorer
             _emptyThumbTex.SetPixel(0, 0, new Color(0.561f, 0.561f, 0.579f, 1f));
             _emptyThumbTex.Apply();
 
-            // v3.0.5: サムネイル背景パネル（グレー。背景との区別を維持）
-            _thumbPanelTex = new Texture2D(1, 1);
-            _thumbPanelTex.SetPixel(0, 0, new Color(0.561f, 0.561f, 0.579f, 1f));
-            _thumbPanelTex.Apply();
+            // v3.0.15: サムネイル背景パネルは削除（不要になったため）
 
             _tooltipBgTex = new Texture2D(1, 1);
             _tooltipBgTex.SetPixel(0, 0, new Color(0.422f, 0.459f, 0.542f, 0.95f));
@@ -471,7 +467,6 @@ namespace KK_SceneExplorer
             if (_selectedItemTex != null) Destroy(_selectedItemTex);
             if (_hoverItemTex != null) Destroy(_hoverItemTex);
             if (_emptyThumbTex != null) Destroy(_emptyThumbTex);
-            if (_thumbPanelTex != null) Destroy(_thumbPanelTex);
             if (_tooltipBgTex != null) Destroy(_tooltipBgTex);
             if (_resizeHandleTex != null) Destroy(_resizeHandleTex);
             if (_titleBarTex != null) Destroy(_titleBarTex);
@@ -1053,11 +1048,6 @@ namespace KK_SceneExplorer
             float thumbX = rect.x + (rect.width - _thumbSize) / 2f;
             float thumbY = rect.y + ItemPadY;
             var thumbRect = new Rect(thumbX, thumbY, _thumbSize, _thumbSize);
-            // v3.0.4: サムネイル背景パネル（白系。暗いサムネを浮き立たせる）
-            if (Event.current.type == EventType.Repaint)
-            {
-                GUI.DrawTexture(thumbRect, _thumbPanelTex, ScaleMode.StretchToFill);
-            }
             Texture2D tex = GetThumbnail(item);
             if (tex != null)
             {
@@ -1474,6 +1464,16 @@ namespace KK_SceneExplorer
                     if (!result.LoadImage(data)) return null;
                     // v3.0.9: デバッグ — 読み込み後テクスチャの平均輝度をログ出力（原因切り分け用）
                     LogThumbnailBrightness(path, result);
+                    // v3.0.15: 表示時に ^2.2 変換される環境のため、ピクセルを ^(1/2.2) に事前補正（UIテクスチャと同様の環境補正）
+                    Color[] px = result.GetPixels();
+                    for (int i = 0; i < px.Length; i++)
+                    {
+                        px[i].r = Mathf.Pow(px[i].r, 0.4545f);
+                        px[i].g = Mathf.Pow(px[i].g, 0.4545f);
+                        px[i].b = Mathf.Pow(px[i].b, 0.4545f);
+                    }
+                    result.SetPixels(px);
+                    result.Apply();
                     return result;
                 }
             }
