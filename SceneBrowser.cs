@@ -1448,10 +1448,10 @@ namespace KK_SceneExplorer
                     int width = 0;
                     int height = 0;
                     Texture2D result = PngAssist.ChangeTextureFromPngByte(data, ref width, ref height);
-                    // v3.0.7: 読み込み時に明るさ・コントラスト補正を適用（Config設定値）
+                    // v3.0.8: 読み込み時にガンマ・コントラスト補正を適用（Config設定値）
                     if (result != null && result.width > 0 && result.height > 0)
                     {
-                        ApplyThumbnailBrightness(result, SceneExplorerPlugin.ThumbBrightness.Value, SceneExplorerPlugin.ThumbContrast.Value);
+                        ApplyThumbnailBrightness(result, SceneExplorerPlugin.ThumbGamma.Value, SceneExplorerPlugin.ThumbContrast.Value);
                     }
                     return result;
                 }
@@ -1462,16 +1462,21 @@ namespace KK_SceneExplorer
             }
         }
 
-        // v3.0.6: サムネイルの明るさ・コントラスト補正。読み込み時に1回だけ適用。
-        private static void ApplyThumbnailBrightness(Texture2D tex, float gain, float contrast)
+        // v3.0.8: サムネイルのガンマ・コントラスト補正。読み込み時に1回だけ適用。
+        private static void ApplyThumbnailBrightness(Texture2D tex, float gamma, float contrast)
         {
             Color[] pixels = tex.GetPixels();
+            float exponent = 1f / gamma; // gamma > 1 で明るく（暗部が重点的に持ち上がる）
             for (int i = 0; i < pixels.Length; i++)
             {
                 Color c = pixels[i];
-                c.r = 0.5f + (Mathf.Min(c.r * gain, 1f) - 0.5f) * contrast;
-                c.g = 0.5f + (Mathf.Min(c.g * gain, 1f) - 0.5f) * contrast;
-                c.b = 0.5f + (Mathf.Min(c.b * gain, 1f) - 0.5f) * contrast;
+                c.r = Mathf.Pow(c.r, exponent);
+                c.g = Mathf.Pow(c.g, exponent);
+                c.b = Mathf.Pow(c.b, exponent);
+                // コントラスト低減はガンマ適用後
+                c.r = 0.5f + (c.r - 0.5f) * contrast;
+                c.g = 0.5f + (c.g - 0.5f) * contrast;
+                c.b = 0.5f + (c.b - 0.5f) * contrast;
                 pixels[i] = new Color(Mathf.Clamp01(c.r), Mathf.Clamp01(c.g), Mathf.Clamp01(c.b), c.a);
             }
             tex.SetPixels(pixels);

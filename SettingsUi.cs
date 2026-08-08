@@ -104,15 +104,15 @@ namespace KK_SceneExplorer
 				SceneExplorerPlugin.ResetBrowserStyles();
 			}
 
-			// v3.0.7: サムネイル明るさスライダー
+			// v3.0.8: サムネイルガンマスライダー
 			GUILayout.BeginHorizontal();
-			GUILayout.Label("サムネ明るさ");
-			float newBrightness = GUILayout.HorizontalSlider(SceneExplorerPlugin.ThumbBrightness.Value, 0.8f, 1.5f, GUILayout.Width(200));
-			GUILayout.Label(newBrightness.ToString("F2"));
+			GUILayout.Label("サムネガンマ（大きいほど明るい）");
+			float newGamma = GUILayout.HorizontalSlider(SceneExplorerPlugin.ThumbGamma.Value, 0.7f, 1.5f, GUILayout.Width(200));
+			GUILayout.Label(newGamma.ToString("F2"));
 			GUILayout.EndHorizontal();
-			if (Mathf.Abs(newBrightness - SceneExplorerPlugin.ThumbBrightness.Value) > 0.001f)
+			if (Mathf.Abs(newGamma - SceneExplorerPlugin.ThumbGamma.Value) > 0.001f)
 			{
-				SceneExplorerPlugin.ThumbBrightness.Value = newBrightness;
+				SceneExplorerPlugin.ThumbGamma.Value = newGamma;
 				SceneExplorerPlugin.ConfigFile.Save();
 				SceneExplorerPlugin.ResetThumbnailBrightness();
 			}

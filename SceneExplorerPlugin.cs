@@ -28,7 +28,7 @@ namespace KK_SceneExplorer
 	public class SceneExplorerPlugin : BaseUnityPlugin
 	{
 		public const string GUID = "KK_SceneExplorer";
-		public const string Version = "3.0.7";
+		public const string Version = "3.0.8";
 
 		public static Harmony HarmonyInstance;
 		public static bool kkccDetected;
@@ -47,7 +47,7 @@ namespace KK_SceneExplorer
 		internal static ConfigEntry<int> BrowserWidth;
 		internal static ConfigEntry<int> BrowserHeight;
 		internal static ConfigEntry<int> ThumbSize;
-		internal static ConfigEntry<float> ThumbBrightness;
+		internal static ConfigEntry<float> ThumbGamma;
 		internal static ConfigEntry<float> ThumbContrast;
 
 		internal static string lastSceneFolder;
@@ -120,8 +120,8 @@ namespace KK_SceneExplorer
 				new ConfigDescription("ブラウザの高さ（500〜1600）", new AcceptableValueRange<int>(500, 1600)));
 			ThumbSize = Config.Bind("UI", "ThumbSize", 96,
 				new ConfigDescription("サムネイルサイズ（48〜600）", new AcceptableValueRange<int>(48, 600)));
-			ThumbBrightness = Config.Bind("UI", "ThumbBrightness", 1.18f,
-				new ConfigDescription("サムネイルの明るさ補正（0.8〜1.5）", new AcceptableValueRange<float>(0.8f, 1.5f)));
+			ThumbGamma = Config.Bind("UI", "ThumbGamma", 1.2f,
+				new ConfigDescription("サムネイルのガンマ補正（0.7〜1.5、大きいほど暗部が明るくなる）", new AcceptableValueRange<float>(0.7f, 1.5f)));
 			ThumbContrast = Config.Bind("UI", "ThumbContrast", 0.90f,
 				new ConfigDescription("サムネイルのコントラスト（0.7〜1.1、小さいほど中間調に寄る）", new AcceptableValueRange<float>(0.7f, 1.1f)));
 
