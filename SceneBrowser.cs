@@ -670,22 +670,6 @@ namespace KK_SceneExplorer
                 _titleBarStyle.Draw(titleRect, "\u2601 \u30b7\u30fc\u30f3\u3092\u958b\u304f", false, false, false, false); // ? シーンを開く
             }
 
-            // v3.0.10: デバッグ — サムネ読み込み後の平均輝度を一時表示（読み込み後8秒間）
-            if (LastThumbBrightness >= 0f && Time.realtimeSinceStartup < _brightnessShownUntil)
-            {
-                var dbgStyle = new GUIStyle(GUI.skin.label) { fontSize = 12, alignment = TextAnchor.MiddleCenter };
-                dbgStyle.normal.textColor = Color.yellow;
-                var dbgRect = new Rect(0, titleRect.yMax + 2, fullRect.width, 18);
-                GUI.Label(dbgRect, "Debug: サムネ読み込み後 平均輝度 = " + LastThumbBrightness.ToString("F3"), dbgStyle);
-                // v3.0.12: 画面描画後の明るさを ReadPixels で実測（1回のみ）
-                if (!_screenSampled)
-                {
-                    _screenSampled = true;
-                    StartCoroutine(SampleThumbBrightness());
-                }
-            }
-
-
             DrawToolbar(toolbarRect);
             DrawSplitContent(bodyRect);
             DrawBottomBar(bottomRect);
@@ -1137,13 +1121,6 @@ namespace KK_SceneExplorer
             if (tex != null)
             {
                 GUI.DrawTexture(thumbRect, tex, ScaleMode.ScaleToFit);
-                // v3.0.12: 画面計測用にサムネ実描画領域を記録（パネル余白を除外、グローバル座標）
-                float texAspect = tex.width > 0 && tex.height > 0 ? (float)tex.width / tex.height : 1f;
-                float drawW = texAspect > 1f ? thumbRect.width : thumbRect.height * texAspect;
-                float drawH = texAspect > 1f ? thumbRect.width / texAspect : thumbRect.height;
-                _lastThumbDrawRect = new Rect(_windowRect.x + thumbRect.x + (thumbRect.width - drawW) / 2f,
-                                              _windowRect.y + thumbRect.y + (thumbRect.height - drawH) / 2f,
-                                              drawW, drawH);
             }
             else
             {
@@ -1625,8 +1602,6 @@ namespace KK_SceneExplorer
                     item.ThumbRequested = false;
                     return;
                 }
-                // v3.0.9: デバッグ — 読み込み後テクスチャの平均輝度をログ出力（メインスレッドでの呼び出しを維持）
-                LogThumbnailBrightness(item.FilePath, result);
                 // v3.0.15: 表示時に ^2.2 変換される環境のため、ピクセルを ^(1/2.2) に事前補正（UIテクスチャと同様の環境補正）
                 Color[] px = result.GetPixels();
                 for (int i = 0; i < px.Length; i++)
@@ -1646,82 +1621,6 @@ namespace KK_SceneExplorer
             {
                 // サムネイル読み込み失敗は無視（再試行可能に戻す）
                 item.ThumbRequested = false;
-            }
-        }
-
-        // v3.0.10: デバッグ用 — サムネ読み込み後の平均輝度（画面表示＋専用ログファイル。BepInEx ログ設定に依存しない）
-        public static float LastThumbBrightness = -1f;
-        private static float _brightnessShownUntil = 0f;
-        // v3.0.13: 1ファイルの結果で断定しないため、最初の20ファイルの読み込み輝度を記録する
-        private static int brightnessLogCount;
-        // v3.0.12: デバッグ用 — 画面に描画されたサムネの実測（ReadPixels）。読み込み値との差で減衰箇所を特定
-        private static bool _screenSampled;
-        private static Rect _lastThumbDrawRect = new Rect(-1f, -1f, 0f, 0f);
-        private static void LogThumbnailBrightness(string path, Texture2D tex)
-        {
-            if (brightnessLogCount >= 20) return;
-            brightnessLogCount++;
-            try
-            {
-                Color[] px = tex.GetPixels();
-                float avg = 0f;
-                for (int i = 0; i < px.Length; i++)
-                {
-                    avg += 0.2126f * px[i].r + 0.7152f * px[i].g + 0.0722f * px[i].b;
-                }
-                avg /= Mathf.Max(px.Length, 1);
-                LastThumbBrightness = avg;
-                _brightnessShownUntil = Time.realtimeSinceStartup + 8f;
-                string msg = "[v3.0.13 Debug] サムネ読み込み後: " + Path.GetFileName(path) + " 平均輝度=" + avg.ToString("F3") + " (" + tex.width + "x" + tex.height + ")";
-                try
-                {
-                    string root = Path.GetDirectoryName(Application.dataPath);
-                    File.AppendAllText(Path.Combine(root, "KK_SceneExplorer_brightness.log"), msg + Environment.NewLine);
-                }
-                catch { }
-                SceneExplorerPlugin.Log.LogWarning(msg);
-            }
-            catch (Exception ex)
-            {
-                SceneExplorerPlugin.Log.LogWarning("[v3.0.10 Debug] 輝度計測失敗: " + ex.Message);
-            }
-        }
-
-        // v3.0.12: デバッグ — 画面に実際に描画されたサムネの平均輝度を ReadPixels で計測（1回のみ）
-        private IEnumerator SampleThumbBrightness()
-        {
-            yield return new WaitForEndOfFrame();
-            try
-            {
-                if (_lastThumbDrawRect.width <= 1f || _lastThumbDrawRect.height <= 1f) yield break;
-                float x = Mathf.Clamp(_lastThumbDrawRect.x, 0f, Screen.width - 1f);
-                float y = Mathf.Clamp(Screen.height - _lastThumbDrawRect.yMax, 0f, Screen.height - 1f);
-                float w = Mathf.Min(_lastThumbDrawRect.width, Screen.width - x);
-                float h = Mathf.Min(_lastThumbDrawRect.height, Screen.height - y);
-                if (w <= 1f || h <= 1f) yield break;
-                var tex = new Texture2D((int)w, (int)h, TextureFormat.RGB24, false);
-                tex.ReadPixels(new Rect(x, y, w, h), 0, 0);
-                tex.Apply();
-                Color[] px = tex.GetPixels();
-                float avg = 0f;
-                for (int i = 0; i < px.Length; i++)
-                {
-                    avg += 0.2126f * px[i].r + 0.7152f * px[i].g + 0.0722f * px[i].b;
-                }
-                avg /= Mathf.Max(px.Length, 1);
-                string msg = "[v3.0.12 Debug] 画面描画後のサムネ平均輝度=" + avg.ToString("F3") + " (読み込み値=" + LastThumbBrightness.ToString("F3") + ")";
-                try
-                {
-                    string root = Path.GetDirectoryName(Application.dataPath);
-                    File.AppendAllText(Path.Combine(root, "KK_SceneExplorer_brightness.log"), msg + Environment.NewLine);
-                }
-                catch { }
-                SceneExplorerPlugin.Log.LogWarning(msg);
-                Destroy(tex);
-            }
-            catch (Exception ex)
-            {
-                SceneExplorerPlugin.Log.LogWarning("[v3.0.12 Debug] 画面計測失敗: " + ex.Message);
             }
         }
 
