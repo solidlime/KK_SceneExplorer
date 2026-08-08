@@ -909,6 +909,12 @@ namespace KK_SceneExplorer
                     if (_selectedIndex >= 0 && _selectedIndex < _items.Count)
                         ReplaceSelected(_items[_selectedIndex].FilePath, sex);
                 }
+                // v3.2.3: 服を変えずに顔・体型・髪だけ差し替える（標準 ChangeChara は服も変わるため）
+                if (GUILayout.Button("Keep Clothes", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
+                {
+                    if (_selectedIndex >= 0 && _selectedIndex < _items.Count)
+                        KeepClothesSelected(_items[_selectedIndex].FilePath, sex);
+                }
                 GUI.enabled = true;
             }
             else
@@ -1177,6 +1183,12 @@ namespace KK_SceneExplorer
         // グリッドペイン（右側）— v2.2.0: スクロール式（全件表示）
         // ═══════════════════════════════════════════════════════
 
+        // v3.2.3: サムネイルの縦横比（シーン=16:9 横長、キャラ/衣装=カード PNG 240x320 の 3:4 縦長）
+        private float GetThumbAspect()
+        {
+            return (SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.Scene) ? 9f / 16f : 4f / 3f;
+        }
+
         private void DrawGridPanel(Rect panelRect)
         {
             if (_items.Count == 0)
@@ -1195,9 +1207,9 @@ namespace KK_SceneExplorer
 
             // グリッド計算
             float cellW = _thumbSize + ItemPadX * 2;
-            // サムネを16:9化してテキストまでの縦隙間を削減（シーンサムネは320x180固定）
+            // v3.2.3: サムネ縦横比はモード別（シーン=16:9 固定、キャラ/衣装=カードの 3:4 に合わせ縦長）
             float thumbW = cellW - ItemPadX * 2f;           // サムネ幅 = セル幅 − 左右余白（= _thumbSize と一致）
-            float thumbH = thumbW * 9f / 16f;               // 16:9
+            float thumbH = thumbW * GetThumbAspect();       // モード別アスペクト（シーン 16:9 / キャラ衣装 3:4）
             float cellH = thumbH + TextLineHeight * 3 + ItemPadY * 2 + 2f;  // テキスト直下の隙間は2px
             int cols = Mathf.Max(1, Mathf.FloorToInt((panelRect.width - 16) / (cellW + ItemSpacing)));
             float gridTotalW = cols * (cellW + ItemSpacing) - ItemSpacing;
@@ -1254,9 +1266,9 @@ namespace KK_SceneExplorer
                 GUI.DrawTexture(rect, _hoverItemTex, ScaleMode.StretchToFill);
             }
 
-            // サムネイル（16:9。ScaleMode.ScaleToFit のため16:9以外のサムネも収まる）
+            // サムネイル（v3.2.3: モード別アスペクト。ScaleMode.ScaleToFit のため異比サムネも収まる）
             float thumbW = rect.width - ItemPadX * 2f;      // DrawGridPanel の cellW − ItemPadX*2 と同じ値
-            float thumbH = thumbW * 9f / 16f;
+            float thumbH = thumbW * GetThumbAspect();       // シーン 16:9 / キャラ衣装 3:4
             float thumbX = rect.x + ItemPadX;               // 左右余白は ItemPadX に一致
             float thumbY = rect.y + ItemPadY;
             var thumbRect = new Rect(thumbX, thumbY, thumbW, thumbH);
@@ -1526,6 +1538,52 @@ namespace KK_SceneExplorer
                 catch (Exception ex) { SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] キャラ置き換え失敗: " + path + " - " + ex.Message); }
             }
             SceneExplorerPlugin.Log.LogInfo("[SceneBrowser] キャラ置き換え: " + path + " x" + targets.Length);
+        }
+
+        // v3.2.3: 服を変えずに読み込み（顔・体型・髪のみ差し替え。Keep Clothes ボタン用）
+        private void KeepClothesSelected(string path, int sex)
+        {
+            Studio.OCIChar[] targets = CollectSameSexChara(sex);
+            if (targets == null || targets.Length == 0)
+            {
+                SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] KeepClothes: シーン内で同性別キャラクターを選択してください");
+                return;
+            }
+            for (int i = 0; i < targets.Length; i++)
+            {
+                try { ApplyKeepClothes(targets[i], path); }
+                catch (Exception ex) { SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] 服維持読込失敗: " + path + " - " + ex.Message); }
+            }
+            SceneExplorerPlugin.Log.LogInfo("[SceneBrowser] 服を変えずに読込: " + path + " x" + targets.Length);
+        }
+
+        // v3.2.3: 標準 ChangeChara の骨組みで、Reload だけ服維持（noChangeClothes:true）にする
+        private void ApplyKeepClothes(Studio.OCIChar ociChar, string path)
+        {
+            // 髪ボーンを除去（ChangeChara と同一手順）
+            foreach (var bone in ociChar.listBones.Where(v => v.boneGroup == Studio.OIBoneInfo.BoneGroup.Hair).ToList())
+            {
+                Singleton<Studio.GuideObjectManager>.Instance.Delete(bone.guideObject);
+            }
+            ociChar.listBones = ociChar.listBones.Where(v => v.boneGroup != Studio.OIBoneInfo.BoneGroup.Hair).ToList();
+            var hairKeys = ociChar.oiCharInfo.bones.Where(b => b.Value.group == Studio.OIBoneInfo.BoneGroup.Hair).Select(b => b.Key).ToArray();
+            for (int i = 0; i < hairKeys.Length; i++) ociChar.oiCharInfo.bones.Remove(hairKeys[i]);
+            ociChar.hairDynamic = null;
+            ociChar.skirtDynamic = null;
+
+            var charInfo = ociChar.charInfo;
+            charInfo.chaFile.LoadCharaFile(path, byte.MaxValue, noLoadPng: true);
+            charInfo.ChangeCoordinateType((ChaFileDefine.CoordinateType)charInfo.fileStatus.coordinateType);
+            // 服だけ維持して顔・髪・体型を新カードで再構築（ChangeChara の Reload() フル版と対）
+            charInfo.Reload(noChangeClothes: true, noChangeHead: false, noChangeHair: false, noChangeBody: false);
+            ociChar.treeNodeObject.textName = charInfo.chaFile.parameter.fullname;
+
+            try { Studio.AddObjectAssist.InitHairBone(ociChar, Singleton<Studio.Info>.Instance.dicBoneInfo); }
+            catch { /* 髪ボーン初期化失敗は無視（ChangeChara も同様の耐障害性） */ }
+            try { ociChar.hairDynamic = Studio.AddObjectFemale.GetHairDynamic(charInfo.objHair); }
+            catch { }
+            try { ociChar.skirtDynamic = Studio.AddObjectFemale.GetSkirtDynamic(charInfo.objClothes); }
+            catch { }
         }
 
         // v3.1.0: 選択中キャラに衣装を適用（未選択なら何もしない）
