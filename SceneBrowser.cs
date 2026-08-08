@@ -1022,7 +1022,7 @@ namespace KK_SceneExplorer
             // グリッド計算
             float cellW = _thumbSize + ItemPadX * 2;
             // サムネを16:9化してテキストまでの縦隙間を削減（シーンサムネは320x180固定）
-            float thumbW = _thumbSize - 8f;                 // 左右4px余白
+            float thumbW = cellW - ItemPadX * 2f;           // サムネ幅 = セル幅 − 左右余白（= _thumbSize と一致）
             float thumbH = thumbW * 9f / 16f;               // 16:9
             float cellH = thumbH + TextLineHeight * 3 + ItemPadY * 2 + 2f;  // テキスト直下の隙間は2px
             int cols = Mathf.Max(1, Mathf.FloorToInt((panelRect.width - 16) / (cellW + ItemSpacing)));
@@ -1081,9 +1081,9 @@ namespace KK_SceneExplorer
             }
 
             // サムネイル（16:9。ScaleMode.ScaleToFit のため16:9以外のサムネも収まる）
-            float thumbW = rect.width - 8f;
+            float thumbW = rect.width - ItemPadX * 2f;      // DrawGridPanel の cellW − ItemPadX*2 と同じ値
             float thumbH = thumbW * 9f / 16f;
-            float thumbX = rect.x + 4f;
+            float thumbX = rect.x + ItemPadX;               // 左右余白は ItemPadX に一致
             float thumbY = rect.y + ItemPadY;
             var thumbRect = new Rect(thumbX, thumbY, thumbW, thumbH);
             Texture2D tex = GetThumbnail(item);
