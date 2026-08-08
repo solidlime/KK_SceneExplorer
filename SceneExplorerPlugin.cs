@@ -28,7 +28,7 @@ namespace KK_SceneExplorer
 	public class SceneExplorerPlugin : BaseUnityPlugin
 	{
 		public const string GUID = "KK_SceneExplorer";
-		public const string Version = "3.0.1";
+		public const string Version = "3.0.2";
 
 		public static Harmony HarmonyInstance;
 		public static bool kkccDetected;
@@ -46,6 +46,7 @@ namespace KK_SceneExplorer
 		internal static ConfigEntry<int> FontSize;
 		internal static ConfigEntry<int> BrowserWidth;
 		internal static ConfigEntry<int> BrowserHeight;
+		internal static ConfigEntry<int> ThumbSize;
 
 		internal static string lastSceneFolder;
 		internal static string lastLoadedFolder;
@@ -105,6 +106,8 @@ namespace KK_SceneExplorer
 				new ConfigDescription("ブラウザの幅（800〜2560）", new AcceptableValueRange<int>(800, 2560)));
 			BrowserHeight = Config.Bind("UI", "BrowserHeight", 800,
 				new ConfigDescription("ブラウザの高さ（500〜1600）", new AcceptableValueRange<int>(500, 1600)));
+			ThumbSize = Config.Bind("UI", "ThumbSize", 96,
+				new ConfigDescription("サムネイルサイズ（48〜480）", new AcceptableValueRange<int>(48, 480)));
 
 			HarmonyInstance = new Harmony(GUID);
 			Patches.ApplyAll(HarmonyInstance);

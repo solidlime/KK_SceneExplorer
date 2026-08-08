@@ -206,9 +206,9 @@ namespace KK_SceneExplorer
             _titleBarTex.SetPixel(0, 0, new Color(0.16f, 0.16f, 0.16f, 1f));
             _titleBarTex.Apply();
 
-            // v2.6.0: ウィンドウ背景（ほぼ不透明。背後がうっすら見える程度）
+            // v3.0.2: ウィンドウ背景（10%透過。背後がうっすら見える程度）
             _windowBgTex = new Texture2D(1, 1);
-            _windowBgTex.SetPixel(0, 0, new Color(0.11f, 0.11f, 0.11f, 0.96f));
+            _windowBgTex.SetPixel(0, 0, new Color(0.11f, 0.11f, 0.11f, 0.90f));
             _windowBgTex.Apply();
 
             // v2.6.0: モーダル用透明テクスチャ（クリック吸収レイヤーに使用）
@@ -219,6 +219,8 @@ namespace KK_SceneExplorer
             // 保存済みウィンドウサイズを読み込み
             _lastSavedWidth = (float)SceneExplorerPlugin.BrowserWidth.Value;
             _lastSavedHeight = (float)SceneExplorerPlugin.BrowserHeight.Value;
+            // v3.0.2: 保存済みサムネイルサイズを読み込み（Plugin.Awake の Config.Bind より後に実行されるため安全）
+            _thumbSize = (float)SceneExplorerPlugin.ThumbSize.Value;
         }
 
         private void Update()
@@ -634,9 +636,14 @@ namespace KK_SceneExplorer
 
             GUILayout.FlexibleSpace();
 
-            // サムネサイズスライダー
+            // サムネサイズスライダー（v3.0.2: 変更を設定に書き戻し、次回起動時に復元）
             GUILayout.Label("\u30b5\u30e0\u30cd:", GUILayout.Width(FontSliderLabelWidth)); // サムネ:
-            _thumbSize = GUILayout.HorizontalSlider(_thumbSize, 48f, 480f, GUILayout.Width(SliderWidth));
+            float newThumb = GUILayout.HorizontalSlider(_thumbSize, 48f, 480f, GUILayout.Width(SliderWidth));
+            if (Mathf.Abs(newThumb - _thumbSize) > 0.5f)
+            {
+                _thumbSize = newThumb;
+                SceneExplorerPlugin.ThumbSize.Value = (int)newThumb;
+            }
             GUILayout.Label(((int)_thumbSize).ToString() + "px", GUILayout.Width(FontSliderPxWidth));
 
             GUILayout.EndHorizontal();
