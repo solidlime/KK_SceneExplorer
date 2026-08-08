@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Threading;
 using Manager;
 using UnityEngine;
 
@@ -127,6 +128,14 @@ namespace KK_SceneExplorer
         private Dictionary<string, Texture2D> _thumbCache = new Dictionary<string, Texture2D>();
         private List<string> _thumbCacheOrder = new List<string>();
 
+        // ── 非同期サムネイルロード（net35: ThreadPool + lock キュー。ConcurrentQueue / Task / async は不使用）──
+        // 要求キュー: メインスレッドが積み、バックグラウンドスレッドが取り出す
+        private readonly object _thumbReqLock = new object();
+        private readonly Queue<SceneItem> _thumbReqQueue = new Queue<SceneItem>();
+        // 結果キュー: バックグラウンドスレッドが積み、メインスレッドが取り出す
+        private readonly object _thumbResLock = new object();
+        private readonly Queue<ThumbLoadResult> _thumbResQueue = new Queue<ThumbLoadResult>();
+
         // GUIStyle（OnGUI初回に生成）
         private GUIStyle _nodeButtonStyle;
         private GUIStyle _filterStyle;
@@ -155,6 +164,15 @@ namespace KK_SceneExplorer
             public long FileSize;
             public Texture2D Thumbnail;
             public bool ThumbLoaded;
+            // 非同期ロード要求済みフラグ（二重要求防止。GetThumbnail からのみ操作）
+            public bool ThumbRequested;
+        }
+
+        // 非同期サムネイルロードの結果（バックグラウンド → メインスレッド受け渡し用）
+        private class ThumbLoadResult
+        {
+            public SceneItem Item;
+            public byte[] Data;
         }
 
         private class DirEntry
@@ -239,6 +257,9 @@ namespace KK_SceneExplorer
 
         private void Update()
         {
+            // 非同期サムネイルロードの結果をメインスレッドで処理（1フレーム最大2件）
+            ProcessThumbnailResults();
+
             if (_loading) return;
             if (Time.time < _nextCheckTime) return;
             _nextCheckTime = Time.time + CheckInterval;
@@ -1298,6 +1319,11 @@ namespace KK_SceneExplorer
             _selectedIndex = -1;
             _gridScroll = Vector2.zero;
 
+            // 非同期サムネイル要求を破棄（フォルダ切替後の古い要求が溜まらないように）。
+            // 実行中スレッドの結果は ProcessThumbnailResults の参照一致検証で無害化される。
+            lock (_thumbReqLock) _thumbReqQueue.Clear();
+            lock (_thumbResLock) _thumbResQueue.Clear();
+
             string basePath = _lastScannedFolder;
             if (string.IsNullOrEmpty(basePath))
             {
@@ -1389,21 +1415,13 @@ namespace KK_SceneExplorer
                 return tex;
             }
 
-            // ロード（非同期化が必要なら後で対応）
-            try
+            // 非同期ロード: 要求キューに積み、このフレームではプレースホルダー（☉）を返す。
+            // ThumbRequested フラグで二重要求を防止（メインスレッドからのみ呼ばれる）。
+            if (!item.ThumbRequested)
             {
-                tex = LoadSceneThumbnail(item.FilePath);
-                if (tex != null)
-                {
-                    AddToThumbnailCache(item.FilePath, tex);
-                    item.Thumbnail = tex;
-                }
+                item.ThumbRequested = true;
+                EnqueueThumbnailRequest(item);
             }
-            catch
-            {
-                // サムネイル読み込み失敗は無視
-            }
-            item.ThumbLoaded = true;
             return item.Thumbnail;
         }
 
@@ -1497,6 +1515,105 @@ namespace KK_SceneExplorer
             result.SetPixels(px);
             result.Apply();
             return result;
+        }
+
+        // ── 非同期サムネイルロード（v3.0.16）──
+        // 要求をキューに積み、バックグラウンド読み込みを開始する（メインスレッドからのみ呼ぶ）
+        private void EnqueueThumbnailRequest(SceneItem item)
+        {
+            bool spawnWorker = false;
+            lock (_thumbReqLock)
+            {
+                // キューが空の時だけワーカーを起動（無駄なスレッド生成を避ける）
+                if (_thumbReqQueue.Count == 0) spawnWorker = true;
+                _thumbReqQueue.Enqueue(item);
+            }
+            if (spawnWorker)
+            {
+                ThreadPool.QueueUserWorkItem(ThumbnailWorker);
+            }
+        }
+
+        // バックグラウンドスレッド: 要求キューを一括取得し、PNGバイトを読み取って結果キューに積む。
+        // Unity API（Texture2D 等）には一切触れない（触るとクラッシュするため禁止）。
+        private void ThumbnailWorker(object state)
+        {
+            List<SceneItem> batch;
+            lock (_thumbReqLock)
+            {
+                if (_thumbReqQueue.Count == 0) return;
+                batch = new List<SceneItem>(_thumbReqQueue);
+                _thumbReqQueue.Clear();
+            }
+
+            for (int i = 0; i < batch.Count; i++)
+            {
+                SceneItem item = batch[i];
+                byte[] data = ReadThumbnailBytes(item.FilePath);
+                lock (_thumbResLock)
+                {
+                    _thumbResQueue.Enqueue(new ThumbLoadResult { Item = item, Data = data });
+                }
+            }
+        }
+
+        // メインスレッド: 結果キューを1フレーム最大2件処理（Update の先頭で呼ぶ）
+        private void ProcessThumbnailResults()
+        {
+            for (int n = 0; n < 2; n++)
+            {
+                ThumbLoadResult res;
+                lock (_thumbResLock)
+                {
+                    if (_thumbResQueue.Count == 0) return;
+                    res = _thumbResQueue.Dequeue();
+                }
+                // フォルダ切替後は SceneItem が破棄されている — 参照一致で検証し、破棄（デコードもしない）
+                if (res.Item == null || !_items.Contains(res.Item)) continue;
+                ApplyThumbnailResult(res.Item, res.Data);
+            }
+        }
+
+        // メインスレッド: バイト列から Texture2D を生成（デコード・ガンマ補正・キャッシュ登録）
+        private void ApplyThumbnailResult(SceneItem item, byte[] data)
+        {
+            if (data == null || data.Length == 0)
+            {
+                // 読み込み失敗 — 再試行可能に戻す（従来の再ロード挙動と同等）
+                item.ThumbRequested = false;
+                return;
+            }
+            try
+            {
+                Texture2D result = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                if (!result.LoadImage(data))
+                {
+                    Destroy(result);
+                    item.ThumbRequested = false;
+                    return;
+                }
+                // v3.0.9: デバッグ — 読み込み後テクスチャの平均輝度をログ出力（メインスレッドでの呼び出しを維持）
+                LogThumbnailBrightness(item.FilePath, result);
+                // v3.0.15: 表示時に ^2.2 変換される環境のため、ピクセルを ^(1/2.2) に事前補正（UIテクスチャと同様の環境補正）
+                Color[] px = result.GetPixels();
+                for (int i = 0; i < px.Length; i++)
+                {
+                    px[i].r = Mathf.Pow(px[i].r, 0.4545f);
+                    px[i].g = Mathf.Pow(px[i].g, 0.4545f);
+                    px[i].b = Mathf.Pow(px[i].b, 0.4545f);
+                }
+                result.SetPixels(px);
+                result.Apply();
+                AddToThumbnailCache(item.FilePath, result);
+                item.Thumbnail = result;
+                item.ThumbLoaded = true;
+                item.ThumbRequested = false;
+            }
+            catch
+            {
+                // サムネイル読み込み失敗は無視（再試行可能に戻す）
+                item.ThumbRequested = false;
+            }
         }
 
         // v3.0.10: デバッグ用 — サムネ読み込み後の平均輝度（画面表示＋専用ログファイル。BepInEx ログ設定に依存しない）
