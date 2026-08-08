@@ -51,6 +51,10 @@ namespace KK_SceneExplorer
 		internal static ConfigEntry<int> BrowserHeight;
 		internal static ConfigEntry<int> ThumbSize;
 		internal static ConfigEntry<float> TreeSplitPos;
+		// v3.2.1: ファイルソート状態・最後に開いたシーンフォルダの記憶
+		internal static ConfigEntry<int> SortMode;
+		internal static ConfigEntry<bool> SortDescending;
+		internal static ConfigEntry<string> LastFolder;
 
 		internal static string lastSceneFolder;
 		internal static string lastLoadedFolder;
@@ -221,6 +225,9 @@ namespace KK_SceneExplorer
 			EnableCoordinateBrowser = Config.Bind("General", "EnableCoordinateBrowser", false, "衣装ブラウザを使用する（v3.2.0 で一時停止中）");
 			CharaFolders = Config.Bind("General", "CharaFolders", "", "キャラフォルダ（セミコロン区切り）。配下の female/male を女/男タブで自動参照");
 			CoordinateFolders = Config.Bind("General", "CoordinateFolders", "", "衣装フォルダ（セミコロン区切り）");
+			SortMode = Config.Bind("General", "SortMode", 1, "ファイルソート基準（0=名前, 1=日時, 2=サイズ）");
+			SortDescending = Config.Bind("General", "SortDescending", true, "ファイルソート降順");
+			LastFolder = Config.Bind("General", "LastFolder", "", "最後に開いたシーンフォルダ（空=ローカルルート）");
 
 			HarmonyInstance = new Harmony(GUID);
 			Patches.ApplyAll(HarmonyInstance);

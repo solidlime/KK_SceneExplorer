@@ -270,6 +270,23 @@ namespace KK_SceneExplorer
             _thumbSize = (float)SceneExplorerPlugin.ThumbSize.Value;
             // 保存済みスプリッター位置を読み込み（同上の理由で Plugin.Awake より後に実行）
             _splitPos = (float)SceneExplorerPlugin.TreeSplitPos.Value;
+
+            // v3.2.1: 保存済みソート状態を復元（enum 範囲外なら Date に矯正）
+            int savedSort = SceneExplorerPlugin.SortMode.Value;
+            if (savedSort < 0 || savedSort > 2) _sortMode = SortMode.Date;
+            else _sortMode = (SortMode)savedSort;
+            _sortDescending = SceneExplorerPlugin.SortDescending.Value;
+
+            // v3.2.1: 最後に開いたシーンフォルダを復元（存在しないパスは無視 = ローカルルートのまま）
+            if (SceneExplorerPlugin.CurrentBrowserFolder == null)
+            {
+                string last = SceneExplorerPlugin.LastFolder.Value;
+                if (!string.IsNullOrEmpty(last))
+                {
+                    if (!System.IO.Path.IsPathRooted(last)) last = System.IO.Path.Combine(UserData.Path, last);
+                    if (System.IO.Directory.Exists(last)) SceneExplorerPlugin.CurrentBrowserFolder = last;
+                }
+            }
         }
 
         private void Update()
@@ -1790,6 +1807,10 @@ namespace KK_SceneExplorer
                 _sortDescending = true;
             }
             SortItems();
+            // v3.2.1: ソート状態を永続化（次回起動時に復元）
+            SceneExplorerPlugin.SortMode.Value = (int)_sortMode;
+            SceneExplorerPlugin.SortDescending.Value = _sortDescending;
+            SceneExplorerPlugin.ConfigFile.Save();
         }
 
         // ═══════════════════════════════════════════════════════
@@ -2086,6 +2107,12 @@ namespace KK_SceneExplorer
 
             // プラグイン側のフィールドを更新（別タスクで実装）
             SceneExplorerPlugin.CurrentBrowserFolder = path;
+            // v3.2.1: シーンモードでのみ最後に開いたフォルダを記憶（モードルートをシーンの記憶と混ぜない）
+            if (SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.Scene)
+            {
+                SceneExplorerPlugin.LastFolder.Value = path;
+                SceneExplorerPlugin.ConfigFile.Save();
+            }
             RescanFiles();
         }
 
