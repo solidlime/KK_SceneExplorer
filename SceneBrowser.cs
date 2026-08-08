@@ -1485,14 +1485,15 @@ namespace KK_SceneExplorer
         // v3.0.10: デバッグ用 — サムネ読み込み後の平均輝度（画面表示＋専用ログファイル。BepInEx ログ設定に依存しない）
         public static float LastThumbBrightness = -1f;
         private static float _brightnessShownUntil = 0f;
-        private static bool brightnessLogged;
+        // v3.0.13: 1ファイルの結果で断定しないため、最初の20ファイルの読み込み輝度を記録する
+        private static int brightnessLogCount;
         // v3.0.12: デバッグ用 — 画面に描画されたサムネの実測（ReadPixels）。読み込み値との差で減衰箇所を特定
         private static bool _screenSampled;
         private static Rect _lastThumbDrawRect = new Rect(-1f, -1f, 0f, 0f);
         private static void LogThumbnailBrightness(string path, Texture2D tex)
         {
-            if (brightnessLogged) return;
-            brightnessLogged = true;
+            if (brightnessLogCount >= 20) return;
+            brightnessLogCount++;
             try
             {
                 Color[] px = tex.GetPixels();
@@ -1504,7 +1505,7 @@ namespace KK_SceneExplorer
                 avg /= Mathf.Max(px.Length, 1);
                 LastThumbBrightness = avg;
                 _brightnessShownUntil = Time.realtimeSinceStartup + 8f;
-                string msg = "[v3.0.10 Debug] サムネ読み込み後: " + Path.GetFileName(path) + " 平均輝度=" + avg.ToString("F3") + " (" + tex.width + "x" + tex.height + ")";
+                string msg = "[v3.0.13 Debug] サムネ読み込み後: " + Path.GetFileName(path) + " 平均輝度=" + avg.ToString("F3") + " (" + tex.width + "x" + tex.height + ")";
                 try
                 {
                     string root = Path.GetDirectoryName(Application.dataPath);
