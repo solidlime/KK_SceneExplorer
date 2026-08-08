@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Threading;
 using Manager;
@@ -959,21 +960,38 @@ namespace KK_SceneExplorer
             // ルート群: ローカルルート + 設定されたネットワークフォルダを同じ深さ(0)で並べて描画
             List<string> roots = new List<string>();
             bool localAdded = false;
-            string localRoot = UserData.Create("studio/scene");
-            if (!string.IsNullOrEmpty(localRoot) && Directory.Exists(localRoot))
+            // v3.2.0: キャラ/衣装モード中はモードルート群をツリールートとして表示する
+            // （シーンルート（studio/scene + 設定フォルダ群）の代わりに、モードルート配下だけを参照させる）
+            if (SceneExplorerPlugin.CurrentBrowserMode != SceneExplorerPlugin.BrowserMode.Scene)
             {
-                roots.Add(localRoot);
-                localAdded = true;
-            }
-            string[] configuredRoots = SceneExplorerPlugin.ScenePaths.GetConfiguredSceneFolders();
-            if (configuredRoots != null)
-            {
-                for (int i = 0; i < configuredRoots.Length; i++)
+                string[] modeRoots = SceneExplorerPlugin.GetModeRootFolders();
+                for (int i = 0; i < modeRoots.Length; i++)
                 {
-                    string root = configuredRoots[i];
+                    string root = modeRoots[i];
                     if (!string.IsNullOrEmpty(root) && Directory.Exists(root))
                     {
                         roots.Add(root);
+                    }
+                }
+            }
+            else
+            {
+                string localRoot = UserData.Create("studio/scene");
+                if (!string.IsNullOrEmpty(localRoot) && Directory.Exists(localRoot))
+                {
+                    roots.Add(localRoot);
+                    localAdded = true;
+                }
+                string[] configuredRoots = SceneExplorerPlugin.ScenePaths.GetConfiguredSceneFolders();
+                if (configuredRoots != null)
+                {
+                    for (int i = 0; i < configuredRoots.Length; i++)
+                    {
+                        string root = configuredRoots[i];
+                        if (!string.IsNullOrEmpty(root) && Directory.Exists(root))
+                        {
+                            roots.Add(root);
+                        }
                     }
                 }
             }
@@ -1340,10 +1358,10 @@ namespace KK_SceneExplorer
                 switch (SceneExplorerPlugin.CurrentBrowserMode)
                 {
                     case SceneExplorerPlugin.BrowserMode.CharaFemale:
-                        Studio.Studio.Instance.AddFemale(item.FilePath);
+                        AddOrReplaceChara(item.FilePath, 1);   // 1 = 女
                         return;
                     case SceneExplorerPlugin.BrowserMode.CharaMale:
-                        Studio.Studio.Instance.AddMale(item.FilePath);
+                        AddOrReplaceChara(item.FilePath, 0);   // 0 = 男
                         return;
                     case SceneExplorerPlugin.BrowserMode.Coordinate:
                         ApplyCoordinate(item.FilePath);
@@ -1374,6 +1392,48 @@ namespace KK_SceneExplorer
                 SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] シーン読み込み後のダイアログ破棄に失敗: " + ex.Message);
             }
             _loading = false;
+        }
+
+        // v3.2.0: 選択中の同性別 OCIChar がいれば置き換え、いなければ追加
+        // 標準 CharaList.ChangeCharaFemale/Male と同一方式（obj\CharaList_decompiled.cs:123-135）。
+        // GuideObjectManager が未初期化等の場合は従来の追加にフォールバックする。
+        private void AddOrReplaceChara(string path, int sex)
+        {
+            Studio.OCIChar[] targets = null;
+            try
+            {
+                var gom = Singleton<Studio.GuideObjectManager>.Instance;
+                if (gom != null && gom.selectObjectKey != null)
+                {
+                    targets = (from v in gom.selectObjectKey
+                               select Studio.Studio.GetCtrlInfo(v) as Studio.OCIChar into v
+                               where v != null
+                               where v.oiCharInfo.sex == sex
+                               select v).ToArray();
+                }
+            }
+            catch (Exception ex)
+            {
+                SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] 選択キャラ収集に失敗: " + ex.Message);
+                targets = null;   // フォールバック: 追加に落とす
+            }
+
+            if (targets != null && targets.Length > 0)
+            {
+                for (int i = 0; i < targets.Length; i++)
+                {
+                    targets[i].ChangeChara(path);
+                }
+                SceneExplorerPlugin.Log.LogInfo("[SceneBrowser] キャラ置き換え: " + path + " x" + targets.Length);
+            }
+            else if (sex == 1)
+            {
+                Studio.Studio.Instance.AddFemale(path);
+            }
+            else
+            {
+                Studio.Studio.Instance.AddMale(path);
+            }
         }
 
         // v3.1.0: 選択中キャラに衣装を適用（未選択なら何もしない）
@@ -1553,8 +1613,9 @@ namespace KK_SceneExplorer
             {
                 basePath = SceneExplorerPlugin.GetBrowserBasePath();
             }
-            // v3.1.0: モードルートは相対パス（例: "chara/female"）で設定されるため、フルパスへ解決
-            if (SceneExplorerPlugin.GetModeRootFolder() != null && !Path.IsPathRooted(basePath))
+            // v3.2.0: モードルートが存在する場合、相対パス（例: "chara/female"）をフルパスへ解決
+            // （GetModeRootFolders は Directory.Exists 済みフルパスを返すため、通常は IsPathRooted が true でスキップされる）
+            if (SceneExplorerPlugin.GetModeRootFolders().Length > 0 && !Path.IsPathRooted(basePath))
             {
                 basePath = Path.Combine(UserData.Path, basePath);
             }
@@ -1936,14 +1997,22 @@ namespace KK_SceneExplorer
 
         private void SelectFolder(string path)
         {
-            // v3.1.0: キャラ/衣装モードではモードルートより上へ移動させない
-            string modeRoot = SceneExplorerPlugin.GetModeRootFolder();
-            if (modeRoot != null)
+            // v3.2.0: キャラ/衣装モードではモードルート群より上へ移動させない（複数ルート対応）
+            if (SceneExplorerPlugin.CurrentBrowserMode != SceneExplorerPlugin.BrowserMode.Scene)
             {
-                // 計画書の UserData.Path + modeRoot を Path.Combine で堅牢化（UserData.Path の末尾セパレータ非依存）
-                string rootFull = Path.Combine(UserData.Path, modeRoot);
-                if (!path.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase))
-                    path = rootFull;
+                string[] modeRoots = SceneExplorerPlugin.GetModeRootFolders();
+                bool insideAnyRoot = false;
+                for (int i = 0; i < modeRoots.Length; i++)
+                {
+                    // GetModeRootFolders は Directory.Exists 確認済みのフルパスを返す（ResolveFolderSetting 済み）
+                    if (path.StartsWith(modeRoots[i], StringComparison.OrdinalIgnoreCase))
+                    {
+                        insideAnyRoot = true;
+                        break;
+                    }
+                }
+                if (!insideAnyRoot && modeRoots.Length > 0)
+                    path = modeRoots[0];   // いずれのルート配下でもなければ先頭ルートへ矯正
             }
 
             // プラグイン側のフィールドを更新（別タスクで実装）
