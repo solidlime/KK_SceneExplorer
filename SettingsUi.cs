@@ -195,19 +195,20 @@ namespace KK_SceneExplorer
 
 		private static void SaveSceneFolders(List<string> folders)
 		{
-			SceneExplorerPlugin.SceneFolders.Value = string.Join(";", folders.ToArray());
+			// v3.3.0: バックスラッシュをエスケープして保存（BepInEx のエスケープ解釈対策）
+			SceneExplorerPlugin.SceneFolders.Value = SceneExplorerPlugin.EscapeConfigPath(string.Join(";", folders.ToArray()));
 			SceneExplorerPlugin.ConfigFile.Save();
 		}
 
 		private static void SaveCharaFolders(List<string> folders)
 		{
-			SceneExplorerPlugin.CharaFolders.Value = string.Join(";", folders.ToArray());
+			SceneExplorerPlugin.CharaFolders.Value = SceneExplorerPlugin.EscapeConfigPath(string.Join(";", folders.ToArray()));
 			SceneExplorerPlugin.ConfigFile.Save();
 		}
 
 		private static void SaveCoordinateFolders(List<string> folders)
 		{
-			SceneExplorerPlugin.CoordinateFolders.Value = string.Join(";", folders.ToArray());
+			SceneExplorerPlugin.CoordinateFolders.Value = SceneExplorerPlugin.EscapeConfigPath(string.Join(";", folders.ToArray()));
 			SceneExplorerPlugin.ConfigFile.Save();
 		}
 	}

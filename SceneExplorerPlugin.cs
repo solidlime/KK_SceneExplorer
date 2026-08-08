@@ -397,6 +397,14 @@ namespace KK_SceneExplorer
 			Log.LogInfo("BrowserFolders検出: BFのシーンツリーを無効化しました");
 		}
 
+		// v3.3.0: BepInEx の設定読み込みは C# エスケープを解釈する（\\ は \ に、\n は改行になる）。
+		// フォルダパスをそのまま書くと \nas\... のような UNC/ローカルパスが破損するため、
+		// 保存時にバックスラッシュを必ず二重化する（ファイル上は \\nas\\... になり、読込後に元の \nas\... に戻る）。
+		public static string EscapeConfigPath(string path)
+		{
+			return path.Replace("\\", "\\\\");
+		}
+
 		public static class ScenePaths
 		{
 			public static string[] GetConfiguredSceneFolders()
@@ -442,7 +450,8 @@ namespace KK_SceneExplorer
 				}
 				if (changed)
 				{
-					SceneFolders.Value = string.Join(";", result.ToArray());
+					// v3.3.0: エスケープして保存（読込時に \\ が \ に戻り、再正規化の無限ループを防ぐ）
+					SceneFolders.Value = EscapeConfigPath(string.Join(";", result.ToArray()));
 					ConfigFile.Save();
 				}
 				return result.ToArray();
@@ -870,8 +879,8 @@ namespace KK_SceneExplorer
 
 				try
 				{
-					GameObject root = __instance.transform.root.gameObject;
-					if (root != null && root.activeSelf)
+				GameObject root = __instance.transform.root.gameObject;
+				if (root != null && root.activeSelf)
 					{
 						root.SetActive(false);
 						if (!hideLogged)

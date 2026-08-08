@@ -203,6 +203,8 @@ namespace KK_SceneExplorer
 
         private void Awake()
         {
+            try
+            {
             // テクスチャ生成（GUI.skinには触らない — SceneTree.csと同じ方式）
             _selectedRowTex = new Texture2D(1, 1);
             // v3.0.14: 表示時に ^2.2 変換されるため、設計色の ^(1/2.2) に事前補正（以下同様）
@@ -280,18 +282,43 @@ namespace KK_SceneExplorer
             // v3.2.1: 最後に開いたシーンフォルダを復元（存在しないパスは無視 = ローカルルートのまま）
             // v3.2.2: 共通メソッド化（ブラウザ再表示時にも復元されるように CheckFolderChanged からも呼ぶ）
             TryRestoreLastFolder();
+            }
+            catch (Exception ex)
+            {
+                // v3.3.0: Awake 内で例外が発生してもコンポーネントを無効化させない（CatchUnityEventExceptions 対策）
+                // 設定値の不正（バックスラッシュのエスケープ解釈による制御文字混入など）は自己修復される
+                SceneExplorerPlugin.Log.LogError("SceneBrowser Awake で例外が発生しました: " + ex);
+            }
         }
 
         // v3.2.2: シーンモードで CurrentBrowserFolder が未設定なら保存済みフォルダを復元する
         // （モード切替で null にリセットされた後やブラウザを開き直したときにローカルルートへ戻ってしまう問題の修正）
+        // v3.3.0: BepInEx 設定のエスケープ解釈（\n 等）で制御文字が混入した不正値で
+        // OnGUI が例外停止しないよう防御。不正値は警告して空に自己修復する。
         private void TryRestoreLastFolder()
         {
-            if (SceneExplorerPlugin.CurrentBrowserMode != SceneExplorerPlugin.BrowserMode.Scene) return;
-            if (SceneExplorerPlugin.CurrentBrowserFolder != null) return;
-            string last = SceneExplorerPlugin.LastFolder.Value;
-            if (string.IsNullOrEmpty(last)) return;
-            if (!System.IO.Path.IsPathRooted(last)) last = System.IO.Path.Combine(UserData.Path, last);
-            if (System.IO.Directory.Exists(last)) SceneExplorerPlugin.CurrentBrowserFolder = last;
+            try
+            {
+                if (SceneExplorerPlugin.CurrentBrowserMode != SceneExplorerPlugin.BrowserMode.Scene) return;
+                if (SceneExplorerPlugin.CurrentBrowserFolder != null) return;
+                string last = SceneExplorerPlugin.LastFolder.Value;
+                if (string.IsNullOrEmpty(last)) return;
+                if (last.IndexOfAny(System.IO.Path.GetInvalidPathChars()) >= 0)
+                {
+                    SceneExplorerPlugin.Log.LogWarning("保存済みフォルダの設定値に不正な文字が含まれます（LastFolder をリセットしました）");
+                    SceneExplorerPlugin.LastFolder.Value = "";
+                    SceneExplorerPlugin.ConfigFile.Save();
+                    return;
+                }
+                if (!System.IO.Path.IsPathRooted(last)) last = System.IO.Path.Combine(UserData.Path, last);
+                if (System.IO.Directory.Exists(last)) SceneExplorerPlugin.CurrentBrowserFolder = last;
+            }
+            catch (Exception ex)
+            {
+                SceneExplorerPlugin.Log.LogWarning("保存済みフォルダの復元に失敗したため設定をリセットしました: " + ex.Message);
+                SceneExplorerPlugin.LastFolder.Value = "";
+                SceneExplorerPlugin.ConfigFile.Save();
+            }
         }
 
         private void Update()
@@ -2151,9 +2178,10 @@ namespace KK_SceneExplorer
             // プラグイン側のフィールドを更新（別タスクで実装）
             SceneExplorerPlugin.CurrentBrowserFolder = path;
             // v3.2.1: シーンモードでのみ最後に開いたフォルダを記憶（モードルートをシーンの記憶と混ぜない）
+            // v3.3.0: バックスラッシュをエスケープして保存（BepInEx のエスケープ解釈で \n 等が制御文字化するのを防ぐ）
             if (SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.Scene)
             {
-                SceneExplorerPlugin.LastFolder.Value = path;
+                SceneExplorerPlugin.LastFolder.Value = SceneExplorerPlugin.EscapeConfigPath(path);
                 SceneExplorerPlugin.ConfigFile.Save();
             }
             RescanFiles();
