@@ -94,6 +94,12 @@ namespace KK_SceneExplorer
         private float _nextCheckTime;
         private bool _stylesReady;
 
+        // v3.1.0: ブラウザモード遷移検出用（前回フレームのモード。遷移時のみ RescanFiles を1回実行する）
+        private SceneExplorerPlugin.BrowserMode _lastMode = SceneExplorerPlugin.BrowserMode.Scene;
+        // v3.1.0: 衣装モードのリフレクション結果キャッシュ（毎フレームの FindObjectOfType / AccessTools 解決を避ける）
+        private Studio.MPCharCtrl _mpCharCtrl;
+        private UnityEngine.GameObject _costumeRoot;
+
         // ファイル一覧
         private List<SceneItem> _items = new List<SceneItem>();
         private int _selectedIndex = -1;
@@ -289,41 +295,42 @@ namespace KK_SceneExplorer
                 _eventSystemLocked = false;
             }
 
-            // v3.1.0: キャラモード中は CharaList パネルを非表示にして SceneBrowser に差し替える
-            var cl = SceneExplorerPlugin.activeCharaList;
-            bool wantChara = SceneExplorerPlugin.CurrentBrowserMode != SceneExplorerPlugin.BrowserMode.Scene &&
-                             SceneExplorerPlugin.CurrentBrowserMode != SceneExplorerPlugin.BrowserMode.Coordinate;
-            if (wantChara && cl != null && cl.gameObject.activeInHierarchy)
+            // v3.1.0: ブラウザモード遷移の検出と1回限りの初期化
+            // RequestCharaMode / MPCharCtrlOnClickRootPrefix 側で CurrentBrowserMode が切り替わるため、
+            // ここでは遷移時にのみ RescanFiles（ルート読込）と標準パネルの復元を行う。毎フレームの
+            // RescanFiles は行わない（衣装モードで数百ファイルのパースが毎フレーム走る問題の修正）。
+            if (SceneExplorerPlugin.CurrentBrowserMode != _lastMode)
             {
-                cl.gameObject.SetActive(false);
-                if (!_visible) _visible = true;   // ShouldBeVisible は CurrentBrowserMode 基準に拡張される（Task 4）
-                RescanFiles();   // v3.1.0: モードルートの一覧を読み直し
+                _lastMode = SceneExplorerPlugin.CurrentBrowserMode;
+                if (_lastMode == SceneExplorerPlugin.BrowserMode.Scene)
+                {
+                    // モード解除: 標準パネルを復元
+                    RestoreStandardPanels();
+                }
+                else
+                {
+                    // モード開始: 標準パネルを隠してモードルートを読み直す
+                    HideModePanels();
+                    if (!_visible) _visible = true;
+                    RescanFiles();
+                }
             }
 
-            // v3.1.0: 衣装モード中はコスチュームタブのコンテンツ（CostumeInfo）を非表示にして SceneBrowser に差し替える
-            if (SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.Coordinate)
+            // v3.1.0: モード中は標準パネルの再表示を毎フレーム抑止（軽量な維持監視のみ。RescanFiles は呼ばない）
+            bool wantChara = SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.CharaFemale ||
+                             SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.CharaMale;
+            if (wantChara)
             {
-                var mp = UnityEngine.Object.FindObjectOfType<Studio.MPCharCtrl>();
-                if (mp != null && mp.gameObject.activeInHierarchy)
+                foreach (var cl in SceneExplorerPlugin.activeCharaLists)
                 {
-                    // costumeInfo フィールド（private）のルート GameObject を非表示
-                    var fi = HarmonyLib.AccessTools.Field(typeof(Studio.MPCharCtrl), "costumeInfo");
-                    if (fi != null)
-                    {
-                        var ci = fi.GetValue(mp);
-                        if (ci != null)
-                        {
-                            var rootFi = HarmonyLib.AccessTools.Field(ci.GetType(), "objRoot") ?? HarmonyLib.AccessTools.Field(ci.GetType(), "root");
-                            if (rootFi != null)
-                            {
-                                var go = rootFi.GetValue(ci) as UnityEngine.GameObject;
-                                if (go != null && go.activeInHierarchy) go.SetActive(false);
-                            }
-                        }
-                    }
+                    if (cl != null && cl.gameObject.activeInHierarchy) cl.gameObject.SetActive(false);
                 }
-                if (!_visible) _visible = true;
-                RescanFiles();   // v3.1.0: モードルートの一覧を読み直し
+            }
+            else if (SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.Coordinate)
+            {
+                // objRoot の非表示は MPCharCtrlOnClickRootPrefix で実施済み。ここはキャッシュ参照の維持確認のみ
+                if (_costumeRoot == null) _costumeRoot = ResolveCostumeRoot();
+                if (_costumeRoot != null && _costumeRoot.activeInHierarchy) _costumeRoot.SetActive(false);
             }
 
             if (_loading) return;
@@ -1365,6 +1372,11 @@ namespace KK_SceneExplorer
         private void ApplyCoordinate(string path)
         {
             var targets = Studio.Studio.GetSelectObjectCtrl();
+            if (targets == null)
+            {
+                SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] スタジオインスタンス未初期化のため衣装適用を中止: " + path);
+                return;
+            }
             foreach (var obj in targets)
             {
                 if (obj is Studio.OCIChar oci)
@@ -1412,6 +1424,16 @@ namespace KK_SceneExplorer
 
         private void CloseScene()
         {
+            // v3.1.0: キャラ/衣装モード中はダイアログシーンが無いため UnLoad せず、モード解除と標準パネルの復元のみ行う
+            if (SceneExplorerPlugin.CurrentBrowserMode != SceneExplorerPlugin.BrowserMode.Scene)
+            {
+                SceneExplorerPlugin.RequestSceneMode("Close");
+                _visible = false;
+                _selectedIndex = -1;
+                _tooltipText = "";
+                RestoreStandardPanels();
+                return;
+            }
             try
             {
                 Singleton<Manager.Scene>.Instance.UnLoad();
@@ -1419,6 +1441,52 @@ namespace KK_SceneExplorer
             catch (Exception ex)
             {
                 SceneExplorerPlugin.Log.LogError("[SceneBrowser] Close failed: " + ex.Message);
+            }
+        }
+
+        // v3.1.0: キャラ/衣装モード開始時に標準パネルを非表示にする（遷移検出時のみ呼ぶ）
+        private void HideModePanels()
+        {
+            foreach (var cl in SceneExplorerPlugin.activeCharaLists)
+            {
+                if (cl != null && cl.gameObject.activeInHierarchy) cl.gameObject.SetActive(false);
+            }
+            if (_costumeRoot == null) _costumeRoot = ResolveCostumeRoot();
+            if (_costumeRoot != null && _costumeRoot.activeInHierarchy) _costumeRoot.SetActive(false);
+        }
+
+        // v3.1.0: モード解除時に標準パネルを復元する（遷移検出時のみ呼ぶ）
+        private void RestoreStandardPanels()
+        {
+            foreach (var cl in SceneExplorerPlugin.activeCharaLists)
+            {
+                if (cl != null && !cl.gameObject.activeInHierarchy) cl.gameObject.SetActive(true);
+            }
+            if (_costumeRoot != null && !_costumeRoot.activeInHierarchy) _costumeRoot.SetActive(true);
+            _mpCharCtrl = null;   // 次回モード開始時に再解決させる
+            _costumeRoot = null;
+        }
+
+        // v3.1.0: costumeInfo フィールド（private）のルート GameObject を解決する（リフレクション結果はキャッシュ）
+        private UnityEngine.GameObject ResolveCostumeRoot()
+        {
+            if (_mpCharCtrl == null)
+                _mpCharCtrl = UnityEngine.Object.FindObjectOfType<Studio.MPCharCtrl>();
+            if (_mpCharCtrl == null) return null;
+            try
+            {
+                var fi = HarmonyLib.AccessTools.Field(typeof(Studio.MPCharCtrl), "costumeInfo");
+                if (fi == null) return null;
+                var ci = fi.GetValue(_mpCharCtrl);
+                if (ci == null) return null;
+                var rootFi = HarmonyLib.AccessTools.Field(ci.GetType(), "objRoot") ?? HarmonyLib.AccessTools.Field(ci.GetType(), "root");
+                if (rootFi == null) return null;
+                return rootFi.GetValue(ci) as UnityEngine.GameObject;
+            }
+            catch (Exception ex)
+            {
+                SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] costumeInfo ルート解決失敗: " + ex.Message);
+                return null;
             }
         }
 

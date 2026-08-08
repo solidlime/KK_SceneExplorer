@@ -59,7 +59,8 @@ namespace KK_SceneExplorer
 		/// <summary>ブラウザの操作対象モード（v3.1.0: キャラ/衣装対応）</summary>
 		public enum BrowserMode { Scene, CharaFemale, CharaMale, Coordinate }
 
-		internal static Studio.CharaList activeCharaList = null;   // 最後に Awake した CharaList（表示監視用。Task2 の CharaListAwakePostfix で代入）
+		// Awake した CharaList の一覧（女/男タブは別インスタンスの可能性があるため複数保持。Task2 の CharaListAwakePostfix で追記）
+		internal static readonly List<Studio.CharaList> activeCharaLists = new List<Studio.CharaList>();
 		internal static BrowserMode CurrentBrowserMode = BrowserMode.Scene;
 
 		/// <summary>モード対応のルートフォルダ。Scene は null（従来動作）。UserData.Path 基準</summary>
@@ -80,7 +81,12 @@ namespace KK_SceneExplorer
 			if (charaList == null) return;
 			int sex = 1;
 			try { sex = (int)AccessTools.Field(typeof(Studio.CharaList), "sex").GetValue(charaList); }
-			catch (Exception ex) { Log.LogWarning("CharaList.sex 読取失敗: " + ex.Message); }
+			catch (Exception ex)
+			{
+				Log.LogWarning("CharaList.sex 読取失敗: " + ex.Message);
+				RequestSceneMode("sex読取失敗");
+				return;
+			}
 			CurrentBrowserMode = (sex == 1) ? BrowserMode.CharaFemale : BrowserMode.CharaMale;
 			CurrentBrowserFolder = GetModeRootFolder();
 			Log.LogInfo("[SceneExplorer] Charaモード: " + CurrentBrowserMode + " folder=" + CurrentBrowserFolder);
@@ -92,6 +98,7 @@ namespace KK_SceneExplorer
 			if (CurrentBrowserMode != BrowserMode.Scene)
 				Log.LogInfo("[SceneExplorer] モード解除(" + reason + "): " + CurrentBrowserMode + " -> Scene");
 			CurrentBrowserMode = BrowserMode.Scene;
+			CurrentBrowserFolder = null;
 		}
 
 		/// <summary>最後に押された追加タブ（0=女 / 1=男 / それ以外=未選択）。AddButtonCtrl.OnClick Postfix から記録。</summary>
@@ -858,20 +865,25 @@ namespace KK_SceneExplorer
 				}
 			}
 
-			// v3.1.0: CharaList のインスタンスを保持（Awake はスタジオ起動時に一度だけ呼ばれる）
+			// v3.1.0: CharaList のインスタンスを保持（Awake はスタジオ起動時に一度だけ呼ばれる。女/男タブは別インスタンスのためリストで保持）
 			private static void CharaListAwakePostfix(Studio.CharaList __instance)
 			{
-				SceneExplorerPlugin.activeCharaList = __instance;
+				if (__instance == null) return;
+				if (!SceneExplorerPlugin.activeCharaLists.Contains(__instance))
+					SceneExplorerPlugin.activeCharaLists.Add(__instance);
 			}
 
 			// v3.1.0: タブ切替後、CharaList が表示状態になったらキャラモード開始（排他制御なので他タブなら自動で非表示になる）
 			private static void AddButtonOnClickPostfix()
 			{
-				var list = SceneExplorerPlugin.activeCharaList;
-				if (list == null) return;
-				if (list.gameObject.activeInHierarchy)
+				Studio.CharaList activeList = null;
+				foreach (var list in SceneExplorerPlugin.activeCharaLists)
 				{
-					SceneExplorerPlugin.RequestCharaMode(list);
+					if (list != null && list.gameObject.activeInHierarchy) { activeList = list; break; }
+				}
+				if (activeList != null)
+				{
+					SceneExplorerPlugin.RequestCharaMode(activeList);
 				}
 				else if (SceneExplorerPlugin.CurrentBrowserMode != BrowserMode.Scene)
 				{
@@ -880,20 +892,41 @@ namespace KK_SceneExplorer
 			}
 
 			// v3.1.0: コスチュームタブ(_idx==4)で衣装モード開始、それ以外のタブ/閉じ(-1)で解除
-			// パネル非表示中の誤発火（Awake 内 OnClickRoot(select) 等）は activeInHierarchy でガード
+			// _idx==4 の開始時のみ activeInHierarchy でガード（Awake 直後の初期化 OnClickRoot(select=-1) は
+			// CurrentBrowserMode が Scene の間に発火するため else 分岐に入らず無害。パネル非表示時の
+			// OnClickRoot(-1) による解除は許可する = ガードは緩めてある）
 			private static void MPCharCtrlOnClickRootPrefix(Studio.MPCharCtrl __instance, int _idx)
 			{
-				if (__instance == null || !__instance.gameObject.activeInHierarchy) return;
+				if (__instance == null) return;
 				if (_idx == 4)
 				{
+					if (!__instance.gameObject.activeInHierarchy) return;
 					SceneExplorerPlugin.CurrentBrowserMode = BrowserMode.Coordinate;
 					SceneExplorerPlugin.CurrentBrowserFolder = SceneExplorerPlugin.GetModeRootFolder();
+					HideCostumeRoot(__instance);   // 1フレームのちらつき防止のため prefix 内で直接非表示
 					SceneExplorerPlugin.Log.LogInfo("[SceneExplorer] Coordinateモード開始 folder=" + SceneExplorerPlugin.CurrentBrowserFolder);
 				}
 				else if (SceneExplorerPlugin.CurrentBrowserMode == BrowserMode.Coordinate)
 				{
 					SceneExplorerPlugin.RequestSceneMode("コスチュームタブ切替");
 				}
+			}
+
+			// v3.1.0: costumeInfo のルート（objRoot/root）を非表示にする（Update 側の毎フレーム解決を避けるため prefix で実行）
+			private static void HideCostumeRoot(Studio.MPCharCtrl mp)
+			{
+				try
+				{
+					var fi = AccessTools.Field(typeof(Studio.MPCharCtrl), "costumeInfo");
+					if (fi == null) return;
+					var ci = fi.GetValue(mp);
+					if (ci == null) return;
+					var rootFi = AccessTools.Field(ci.GetType(), "objRoot") ?? AccessTools.Field(ci.GetType(), "root");
+					if (rootFi == null) return;
+					var go = rootFi.GetValue(ci) as GameObject;
+					if (go != null && go.activeInHierarchy) go.SetActive(false);
+				}
+				catch (Exception ex) { Log.LogWarning("[SceneExplorer] コスチュームUI非表示失敗: " + ex.Message); }
 			}
 
 			private static void DelayedTransfer(string src, string dest)
