@@ -268,13 +268,41 @@ namespace KK_SceneExplorer
             // v2.0.6: 他プラグインがPopし忘れたGUIClipスタックを剥がす（クリップリーク対策）
             ResetClipLeak();
 
-            // v2.6.0: モーダル化 — ウィンドウ背後のゲームUIへのクリック貫通を防止。
-            // 全画面の透明Buttonをウィンドウより奥（depth=0）に配置し、クリックイベントを吸収する。
-            // GUI.Window（depth=-1000）が前面なのでブラウザ操作は妨げない。
+            // v3.0.1: モーダル化 — ウィンドウ外のみクリック吸収（ウィンドウ内操作を妨げない）。
+            // 全画面1枚のButtonはUnity 5.6でウィンドウ内のMouseDownも消費して操作不能になるため、
+            // ウィンドウRect（8px拡張）の外側を4分割した矩形にButtonを配置する。
             GUI.depth = 0;
             GUI.color = new Color(0, 0, 0, 0);
             GUI.backgroundColor = new Color(0, 0, 0, 0);
-            GUI.Button(new Rect(0, 0, Screen.width, Screen.height), _clearTex);
+            {
+                float margin = 8f;
+                float wx = _windowRect.x - margin;
+                float wy = _windowRect.y - margin;
+                float ww = _windowRect.width + margin * 2f;
+                float wh = _windowRect.height + margin * 2f;
+                float sw = (float)Screen.width;
+                float sh = (float)Screen.height;
+
+                // 上: ウィンドウの上端より上
+                float topH = Mathf.Max(0f, wy);
+                if (topH > 0f) GUI.Button(new Rect(0f, 0f, sw, topH), _clearTex);
+
+                // 下: ウィンドウの下端より下
+                float bottomY = wy + wh;
+                float bottomH = Mathf.Max(0f, sh - bottomY);
+                if (bottomH > 0f) GUI.Button(new Rect(0f, bottomY, sw, bottomH), _clearTex);
+
+                // 左: ウィンドウ左端より左（上・下を除く高さ）
+                float sideY = wy;
+                float sideH = wh;
+                float leftW = Mathf.Max(0f, wx);
+                if (leftW > 0f) GUI.Button(new Rect(0f, sideY, leftW, sideH), _clearTex);
+
+                // 右: ウィンドウ右端より右（上・下を除く高さ）
+                float rightX = wx + ww;
+                float rightW = Mathf.Max(0f, sw - rightX);
+                if (rightW > 0f) GUI.Button(new Rect(rightX, sideY, rightW, sideH), _clearTex);
+            }
             GUI.color = Color.white;
             GUI.backgroundColor = Color.white;
 
