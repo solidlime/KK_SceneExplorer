@@ -181,7 +181,7 @@ namespace KK_SceneExplorer
             _hoverRowTex.Apply();
 
             _splitterTex = new Texture2D(1, 1);
-            _splitterTex.SetPixel(0, 0, new Color(0.30f, 0.35f, 0.45f, 1f));
+            _splitterTex.SetPixel(0, 0, new Color(0.35f, 0.40f, 0.50f, 1f));
             _splitterTex.Apply();
 
             _selectedItemTex = new Texture2D(1, 1);
@@ -193,30 +193,30 @@ namespace KK_SceneExplorer
             _hoverItemTex.Apply();
 
             _emptyThumbTex = new Texture2D(1, 1);
-            _emptyThumbTex.SetPixel(0, 0, new Color(0.94f, 0.94f, 0.96f, 1f));
+            _emptyThumbTex.SetPixel(0, 0, new Color(0.28f, 0.28f, 0.30f, 1f));
             _emptyThumbTex.Apply();
 
-            // v3.0.4: サムネイル背景パネル（白系。暗いサムネを浮き立たせる）
+            // v3.0.5: サムネイル背景パネル（グレー。背景との区別を維持）
             _thumbPanelTex = new Texture2D(1, 1);
-            _thumbPanelTex.SetPixel(0, 0, new Color(0.94f, 0.94f, 0.96f, 1f));
+            _thumbPanelTex.SetPixel(0, 0, new Color(0.28f, 0.28f, 0.30f, 1f));
             _thumbPanelTex.Apply();
 
             _tooltipBgTex = new Texture2D(1, 1);
-            _tooltipBgTex.SetPixel(0, 0, new Color(0.10f, 0.13f, 0.20f, 0.95f));
+            _tooltipBgTex.SetPixel(0, 0, new Color(0.15f, 0.18f, 0.26f, 0.95f));
             _tooltipBgTex.Apply();
 
             _resizeHandleTex = new Texture2D(1, 1);
-            _resizeHandleTex.SetPixel(0, 0, new Color(0.40f, 0.45f, 0.55f, 0.8f));
+            _resizeHandleTex.SetPixel(0, 0, new Color(0.45f, 0.50f, 0.60f, 0.8f));
             _resizeHandleTex.Apply();
 
             // v2.5.3: カスタムタイトルバー背景（Unity標準タイトルバーの代わりに描画）
             _titleBarTex = new Texture2D(1, 1);
-            _titleBarTex.SetPixel(0, 0, new Color(0.10f, 0.14f, 0.22f, 1f));
+            _titleBarTex.SetPixel(0, 0, new Color(0.16f, 0.20f, 0.30f, 1f));
             _titleBarTex.Apply();
 
-            // v3.0.4: ウィンドウ背景（ダークブルー。青みがかった黒で統一）
+            // v3.0.5: ウィンドウ背景（明るいダークブルーグレー。青み維持＋明度アップ）
             _windowBgTex = new Texture2D(1, 1);
-            _windowBgTex.SetPixel(0, 0, new Color(0.13f, 0.16f, 0.24f, 0.93f));
+            _windowBgTex.SetPixel(0, 0, new Color(0.22f, 0.26f, 0.36f, 0.94f));
             _windowBgTex.Apply();
 
             // v2.6.0: モーダル用透明テクスチャ（クリック吸収レイヤーに使用）
@@ -1447,13 +1447,36 @@ namespace KK_SceneExplorer
 
                     int width = 0;
                     int height = 0;
-                    return PngAssist.ChangeTextureFromPngByte(data, ref width, ref height);
+                    Texture2D result = PngAssist.ChangeTextureFromPngByte(data, ref width, ref height);
+                    // v3.0.5: 読み込み時に明るさ補正を適用（1.18倍ゲイン）
+                    if (result != null && result.width > 0 && result.height > 0)
+                    {
+                        ApplyThumbnailBrightness(result, 1.18f);
+                    }
+                    return result;
                 }
             }
             catch
             {
                 return null;
             }
+        }
+
+        // v3.0.5: サムネイルの明るさ補正。読み込み時に1回だけ適用。
+        private static void ApplyThumbnailBrightness(Texture2D tex, float gain)
+        {
+            Color[] pixels = tex.GetPixels();
+            for (int i = 0; i < pixels.Length; i++)
+            {
+                Color c = pixels[i];
+                c.r = Mathf.Min(c.r * gain, 1f);
+                c.g = Mathf.Min(c.g * gain, 1f);
+                c.b = Mathf.Min(c.b * gain, 1f);
+                // a はそのまま
+                pixels[i] = c;
+            }
+            tex.SetPixels(pixels);
+            tex.Apply(false);
         }
 
         private void AddToThumbnailCache(string path, Texture2D tex)
