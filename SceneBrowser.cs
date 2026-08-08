@@ -173,50 +173,51 @@ namespace KK_SceneExplorer
         {
             // テクスチャ生成（GUI.skinには触らない — SceneTree.csと同じ方式）
             _selectedRowTex = new Texture2D(1, 1);
-            _selectedRowTex.SetPixel(0, 0, new Color(0.24f, 0.48f, 0.90f, 0.65f));
+            // v3.0.14: 表示時に ^2.2 変換されるため、設計色の ^(1/2.2) に事前補正（以下同様）
+            _selectedRowTex.SetPixel(0, 0, new Color(0.523f, 0.716f, 0.953f, 0.65f));
             _selectedRowTex.Apply();
 
             _hoverRowTex = new Texture2D(1, 1);
-            _hoverRowTex.SetPixel(0, 0, new Color(0.5f, 0.7f, 1.0f, 0.3f));
+            _hoverRowTex.SetPixel(0, 0, new Color(0.730f, 0.850f, 1.0f, 0.3f));
             _hoverRowTex.Apply();
 
             _splitterTex = new Texture2D(1, 1);
-            _splitterTex.SetPixel(0, 0, new Color(0.35f, 0.40f, 0.50f, 1f));
+            _splitterTex.SetPixel(0, 0, new Color(0.621f, 0.659f, 0.730f, 1f));
             _splitterTex.Apply();
 
             _selectedItemTex = new Texture2D(1, 1);
-            _selectedItemTex.SetPixel(0, 0, new Color(0.24f, 0.48f, 0.90f, 0.4f));
+            _selectedItemTex.SetPixel(0, 0, new Color(0.523f, 0.716f, 0.953f, 0.4f));
             _selectedItemTex.Apply();
 
             _hoverItemTex = new Texture2D(1, 1);
-            _hoverItemTex.SetPixel(0, 0, new Color(0.5f, 0.7f, 1.0f, 0.2f));
+            _hoverItemTex.SetPixel(0, 0, new Color(0.730f, 0.850f, 1.0f, 0.2f));
             _hoverItemTex.Apply();
 
             _emptyThumbTex = new Texture2D(1, 1);
-            _emptyThumbTex.SetPixel(0, 0, new Color(0.28f, 0.28f, 0.30f, 1f));
+            _emptyThumbTex.SetPixel(0, 0, new Color(0.561f, 0.561f, 0.579f, 1f));
             _emptyThumbTex.Apply();
 
             // v3.0.5: サムネイル背景パネル（グレー。背景との区別を維持）
             _thumbPanelTex = new Texture2D(1, 1);
-            _thumbPanelTex.SetPixel(0, 0, new Color(0.28f, 0.28f, 0.30f, 1f));
+            _thumbPanelTex.SetPixel(0, 0, new Color(0.561f, 0.561f, 0.579f, 1f));
             _thumbPanelTex.Apply();
 
             _tooltipBgTex = new Texture2D(1, 1);
-            _tooltipBgTex.SetPixel(0, 0, new Color(0.15f, 0.18f, 0.26f, 0.95f));
+            _tooltipBgTex.SetPixel(0, 0, new Color(0.422f, 0.459f, 0.542f, 0.95f));
             _tooltipBgTex.Apply();
 
             _resizeHandleTex = new Texture2D(1, 1);
-            _resizeHandleTex.SetPixel(0, 0, new Color(0.45f, 0.50f, 0.60f, 0.8f));
+            _resizeHandleTex.SetPixel(0, 0, new Color(0.696f, 0.730f, 0.793f, 0.8f));
             _resizeHandleTex.Apply();
 
             // v2.5.3: カスタムタイトルバー背景（Unity標準タイトルバーの代わりに描画）
             _titleBarTex = new Texture2D(1, 1);
-            _titleBarTex.SetPixel(0, 0, new Color(0.16f, 0.20f, 0.30f, 1f));
+            _titleBarTex.SetPixel(0, 0, new Color(0.435f, 0.481f, 0.581f, 1f));
             _titleBarTex.Apply();
 
             // v3.0.5: ウィンドウ背景（明るいダークブルーグレー。青み維持＋明度アップ）
             _windowBgTex = new Texture2D(1, 1);
-            _windowBgTex.SetPixel(0, 0, new Color(0.22f, 0.26f, 0.36f, 0.94f));
+            _windowBgTex.SetPixel(0, 0, new Color(0.503f, 0.542f, 0.629f, 0.94f));
             _windowBgTex.Apply();
 
             // v2.6.0: モーダル用透明テクスチャ（クリック吸収レイヤーに使用）
@@ -226,11 +227,11 @@ namespace KK_SceneExplorer
 
             // v3.0.3: スクロールバー用テクスチャ（背景と同化しないよう明るめに）
             _scrollbarTrackTex = new Texture2D(1, 1);
-            _scrollbarTrackTex.SetPixel(0, 0, new Color(0.15f, 0.15f, 0.16f, 1f));
+            _scrollbarTrackTex.SetPixel(0, 0, new Color(0.422f, 0.422f, 0.437f, 1f));
             _scrollbarTrackTex.Apply();
 
             _scrollbarThumbTex = new Texture2D(1, 1);
-            _scrollbarThumbTex.SetPixel(0, 0, new Color(0.40f, 0.45f, 0.55f, 1f));
+            _scrollbarThumbTex.SetPixel(0, 0, new Color(0.659f, 0.696f, 0.762f, 1f));
             _scrollbarThumbTex.Apply();
 
             // 保存済みウィンドウサイズを読み込み
