@@ -47,6 +47,7 @@ namespace KK_SceneExplorer
 		internal static ConfigEntry<int> BrowserWidth;
 		internal static ConfigEntry<int> BrowserHeight;
 		internal static ConfigEntry<int> ThumbSize;
+		internal static ConfigEntry<float> TreeSplitPos;
 
 		internal static string lastSceneFolder;
 		internal static string lastLoadedFolder;
@@ -108,6 +109,7 @@ namespace KK_SceneExplorer
 				new ConfigDescription("ブラウザの高さ（500〜1600）", new AcceptableValueRange<int>(500, 1600)));
 			ThumbSize = Config.Bind("UI", "ThumbSize", 96,
 				new ConfigDescription("サムネイルサイズ（48〜600）", new AcceptableValueRange<int>(48, 600)));
+			TreeSplitPos = Config.Bind("UI", "TreeSplitPos", 240f, "ツリー/グリッド分割位置");
 
 			HarmonyInstance = new Harmony(GUID);
 			Patches.ApplyAll(HarmonyInstance);

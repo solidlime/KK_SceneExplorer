@@ -253,6 +253,8 @@ namespace KK_SceneExplorer
             _lastSavedHeight = (float)SceneExplorerPlugin.BrowserHeight.Value;
             // v3.0.2: 保存済みサムネイルサイズを読み込み（Plugin.Awake の Config.Bind より後に実行されるため安全）
             _thumbSize = (float)SceneExplorerPlugin.ThumbSize.Value;
+            // 保存済みスプリッター位置を読み込み（同上の理由で Plugin.Awake より後に実行）
+            _splitPos = (float)SceneExplorerPlugin.TreeSplitPos.Value;
         }
 
         private void Update()
@@ -749,6 +751,8 @@ namespace KK_SceneExplorer
             else if (e.type == EventType.MouseUp && _draggingSplitter)
             {
                 _draggingSplitter = false;
+                // ドラッグ終了時にのみ保存（ドラッグ中の毎フレーム保存はしない）
+                SceneExplorerPlugin.TreeSplitPos.Value = _splitPos;
                 e.Use();
             }
         }
