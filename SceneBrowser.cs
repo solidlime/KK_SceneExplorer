@@ -46,6 +46,7 @@ namespace KK_SceneExplorer
         // TextLineHeight（フォント実行高さ）を基準に統一。
         private float TitleBarHeight { get { return TextLineHeight + 8f; } }
         private float ToolbarHeight { get { return TextLineHeight + 8f; } }
+        private const float BottomBarRightPadding = 20f; // 右下のリサイズエッジ/スクロールバーとの重なりを避ける余白
         private float BottomBarHeight { get { return TextLineHeight + 8f; } }
         private float SliderWidth { get { return Mathf.Max(100f, FontSizeVal * 7f); } }
         private float ButtonHeight { get { return TextLineHeight + 6f; } }
@@ -767,6 +768,9 @@ namespace KK_SceneExplorer
             GUILayout.Label("All " + _items.Count.ToString(), _countLabelStyle, GUILayout.Width(CountLabelWidth));
 
             GUILayout.FlexibleSpace();
+
+            // 右端のリサイズエッジ/スクロールバーとの重なりを避ける
+            GUILayout.Space(BottomBarRightPadding);
 
             // v2.5.4: ボタン幅をFlexibleWidth化（ウィンドウ幅に応じて均等スケール）。ラベル英語化。
             GUI.enabled = _selectedIndex >= 0;
