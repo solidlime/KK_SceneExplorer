@@ -330,7 +330,7 @@ namespace KK_SceneExplorer
             if (Event.current.type == EventType.ScrollWheel && Event.current.control &&
                 _windowRect.Contains(Event.current.mousePosition))
             {
-                float step = (Event.current.delta.y < 0f) ? 8f : -8f;
+                float step = (Event.current.delta.y < 0f) ? 40f : -40f;  // v3.0.16: 拡縮率を5倍（8→40）に増加
                 _thumbSize = Mathf.Clamp(_thumbSize + step, 48f, 600f);
                 SceneExplorerPlugin.ThumbSize.Value = (int)_thumbSize;
                 Event.current.Use();
