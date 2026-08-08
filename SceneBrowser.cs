@@ -1411,7 +1411,8 @@ namespace KK_SceneExplorer
         // ゲーム標準の PngAssist.LoadTexture は FileShare 指定なしで開くため、NAS等で他プロセス
         // （Syncthing等）が書き込み中だと IOException になり得る。FileShare.ReadWrite で開き、
         // PNGのIENDチャンクまでのPNG部分のみ読み取って Texture2D 化する（KKCCの付加データは無視）。
-        private static Texture2D LoadSceneThumbnail(string path)
+        // 非同期化: ファイルI/O部分を分離。Unity API に一切触れないためバックグラウンドスレッドで実行可。
+        private static byte[] ReadThumbnailBytes(string path)
         {
             try
             {
@@ -1466,29 +1467,36 @@ namespace KK_SceneExplorer
                         totalRead += n;
                     }
                     if (totalRead < pngSize) return null;
-
-                    // v3.0.9: PngAssist ではなく Unity 標準の LoadImage で直接読み込む（デコードが暗い問題の切り分け）
-                    Texture2D result = new Texture2D(2, 2, TextureFormat.RGBA32, false);
-                    if (!result.LoadImage(data)) return null;
-                    // v3.0.9: デバッグ — 読み込み後テクスチャの平均輝度をログ出力（原因切り分け用）
-                    LogThumbnailBrightness(path, result);
-                    // v3.0.15: 表示時に ^2.2 変換される環境のため、ピクセルを ^(1/2.2) に事前補正（UIテクスチャと同様の環境補正）
-                    Color[] px = result.GetPixels();
-                    for (int i = 0; i < px.Length; i++)
-                    {
-                        px[i].r = Mathf.Pow(px[i].r, 0.4545f);
-                        px[i].g = Mathf.Pow(px[i].g, 0.4545f);
-                        px[i].b = Mathf.Pow(px[i].b, 0.4545f);
-                    }
-                    result.SetPixels(px);
-                    result.Apply();
-                    return result;
+                    return data;
                 }
             }
             catch
             {
                 return null;
             }
+        }
+
+        private static Texture2D LoadSceneThumbnail(string path)
+        {
+            byte[] data = ReadThumbnailBytes(path);
+            if (data == null) return null;
+
+            // v3.0.9: PngAssist ではなく Unity 標準の LoadImage で直接読み込む（デコードが暗い問題の切り分け）
+            Texture2D result = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+            if (!result.LoadImage(data)) return null;
+            // v3.0.9: デバッグ — 読み込み後テクスチャの平均輝度をログ出力（原因切り分け用）
+            LogThumbnailBrightness(path, result);
+            // v3.0.15: 表示時に ^2.2 変換される環境のため、ピクセルを ^(1/2.2) に事前補正（UIテクスチャと同様の環境補正）
+            Color[] px = result.GetPixels();
+            for (int i = 0; i < px.Length; i++)
+            {
+                px[i].r = Mathf.Pow(px[i].r, 0.4545f);
+                px[i].g = Mathf.Pow(px[i].g, 0.4545f);
+                px[i].b = Mathf.Pow(px[i].b, 0.4545f);
+            }
+            result.SetPixels(px);
+            result.Apply();
+            return result;
         }
 
         // v3.0.10: デバッグ用 — サムネ読み込み後の平均輝度（画面表示＋専用ログファイル。BepInEx ログ設定に依存しない）
