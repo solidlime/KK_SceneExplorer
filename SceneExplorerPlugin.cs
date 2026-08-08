@@ -89,8 +89,7 @@ namespace KK_SceneExplorer
 			}
 			CurrentBrowserMode = (sex == 1) ? BrowserMode.CharaFemale : BrowserMode.CharaMale;
 			CurrentBrowserFolder = GetModeRootFolder();
-			// v3.1.0: ちらつき防止のためパッチ側で直接非表示（Update の遷移ブロックはキャッシュ参照の維持確認のみ）
-			if (charaList.gameObject.activeInHierarchy) charaList.gameObject.SetActive(false);
+			// 非表示は HideModePanels に一本化（スナップショット記録との整合性のため。ちらつき1フレームは許容）
 			Log.LogInfo("[SceneExplorer] Charaモード: " + CurrentBrowserMode + " folder=" + CurrentBrowserFolder);
 		}
 

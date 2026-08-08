@@ -1488,6 +1488,14 @@ namespace KK_SceneExplorer
                 if (go != null && !go.activeInHierarchy) go.SetActive(true);
             }
             _hiddenModePanels.Clear();
+            // v3.1.0: Close 後 select==4 残留による誤再発火防止。
+            // 別キャラ選択時（ociChar setter → UpdateInfo → OnClickRoot(4)）に衣装モードが勝手に開くのを防ぐため、
+            // モード解除時に MPCharCtrl.select を -1 にリセットする（タブ表示は次の OnClickRoot で同期される）。
+            if (_mpCharCtrl != null)
+            {
+                var selectField = HarmonyLib.AccessTools.Field(typeof(Studio.MPCharCtrl), "select");
+                if (selectField != null) selectField.SetValue(_mpCharCtrl, -1);
+            }
             _mpCharCtrl = null;   // 次回モード開始時に再解決させる
             _costumeRoot = null;
         }
