@@ -1611,6 +1611,13 @@ namespace KK_SceneExplorer
             string basePath = _lastScannedFolder;
             if (string.IsNullOrEmpty(basePath))
             {
+                // v3.2.0: モード中に CurrentBrowserFolder が null（モードルートが空 = 設定ミス）なら、
+                // シーンルート（GetBrowserBasePath）をフォールバック走査してキャラカードを無駄パースしないよう空一覧で終了
+                if (SceneExplorerPlugin.GetModeRootFolders().Length > 0)
+                {
+                    SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] モードルートが空のため一覧を空にします（フォルダ設定を確認してください）");
+                    return;
+                }
                 basePath = SceneExplorerPlugin.GetBrowserBasePath();
             }
             // v3.2.0: モードルートが存在する場合、相対パス（例: "chara/female"）をフルパスへ解決
@@ -2005,7 +2012,9 @@ namespace KK_SceneExplorer
                 for (int i = 0; i < modeRoots.Length; i++)
                 {
                     // GetModeRootFolders は Directory.Exists 確認済みのフルパスを返す（ResolveFolderSetting 済み）
-                    if (path.StartsWith(modeRoots[i], StringComparison.OrdinalIgnoreCase))
+                    // プレフィックス誤判定（"C:\chara\female" と "C:\chara\female2"）を防ぐため等値 or セパレータ付き前方一致で判定
+                    if (path.Equals(modeRoots[i], StringComparison.OrdinalIgnoreCase) ||
+                        path.StartsWith(modeRoots[i] + "\\", StringComparison.OrdinalIgnoreCase))
                     {
                         insideAnyRoot = true;
                         break;

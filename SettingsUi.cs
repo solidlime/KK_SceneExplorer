@@ -105,11 +105,16 @@ namespace KK_SceneExplorer
 		}
 
 		// ヘルプ行のスタイル（既存 GUILayout.Label と同様の見た目。細字化したい場合はここで調整）
+		// v3.2.0: 毎フレームの new を避けキャッシュ（フォントサイズ設定変更には fontSize のみ追従）
+		private static GUIStyle _helpStyle;
 		private static GUIStyle HelpStyle()
 		{
-			GUIStyle style = new GUIStyle(GUI.skin.label);
-			style.fontSize = GUI.skin.label.fontSize - 1;
-			return style;
+			if (_helpStyle == null)
+			{
+				_helpStyle = new GUIStyle(GUI.skin.label);
+			}
+			_helpStyle.fontSize = GUI.skin.label.fontSize - 1;
+			return _helpStyle;
 		}
 
 		/// <summary>フォルダ一覧セクションの共通描画（一覧 + 削除 + 追加入力 + 追加ボタン）</summary>

@@ -66,18 +66,6 @@ namespace KK_SceneExplorer
 		internal static readonly List<Studio.CharaList> activeCharaLists = new List<Studio.CharaList>();
 		internal static BrowserMode CurrentBrowserMode = BrowserMode.Scene;
 
-		/// <summary>モード対応のルートフォルダ。Scene は null（従来動作）。UserData.Path 基準</summary>
-		public static string GetModeRootFolder()
-		{
-			switch (CurrentBrowserMode)
-			{
-				case BrowserMode.CharaFemale: return "chara/female";
-				case BrowserMode.CharaMale:   return "chara/male";
-				case BrowserMode.Coordinate:  return "coordinate";
-				default: return null;
-			}
-		}
-
 		/// <summary>v3.2.0: モード対応のルートフォルダ一覧（複数登録対応）。存在するフォルダのみ返す。
 		/// CharaFolders 設定の配下 female/male を女/男タブで自動参照し、設定が空/無効なら UserData 配下の従来パスをフォールバックする。</summary>
 		public static string[] GetModeRootFolders()
@@ -567,14 +555,17 @@ namespace KK_SceneExplorer
 				status.Error = null;
 				try
 				{
-					if (!Directory.Exists(original))
+					// v3.2.0: 実動作（ResolveFolderSetting）と同じ解決で評価。相対パスは UserData.Path 配下として扱う
+					string checkPath = original.Replace('/', '\\');
+					if (!Path.IsPathRooted(checkPath)) checkPath = Path.Combine(UserData.Path, checkPath);
+					if (!Directory.Exists(checkPath))
 					{
 						status.Error = "フォルダが見つかりません";
 						return status;
 					}
-					status.EffectivePath = original;
+					status.EffectivePath = checkPath;
 					status.Exists = true;
-					status.FileCount = Directory.GetFiles(original, "*.png").Length;
+					status.FileCount = Directory.GetFiles(checkPath, "*.png").Length;
 				}
 				catch (Exception ex)
 				{
@@ -1027,7 +1018,9 @@ namespace KK_SceneExplorer
 					if (!__instance.gameObject.activeInHierarchy) return;
 					if (SceneExplorerPlugin.CurrentBrowserMode == BrowserMode.Coordinate) return;   // キャラ切替での誤再発火ガード
 					SceneExplorerPlugin.CurrentBrowserMode = BrowserMode.Coordinate;
-					SceneExplorerPlugin.CurrentBrowserFolder = SceneExplorerPlugin.GetModeRootFolder();
+					// v3.2.0: 設定ルート（CoordinateFolders）を参照（キャラモードの RequestCharaMode と同型）
+					string[] roots = SceneExplorerPlugin.GetModeRootFolders();
+					SceneExplorerPlugin.CurrentBrowserFolder = (roots.Length > 0) ? roots[0] : null;
 					HideCostumeRoot(__instance);   // 1フレームのちらつき防止のため prefix 内で直接非表示
 					SceneExplorerPlugin.Log.LogInfo("[SceneExplorer] Coordinateモード開始 folder=" + SceneExplorerPlugin.CurrentBrowserFolder);
 				}
