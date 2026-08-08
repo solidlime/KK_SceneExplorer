@@ -590,8 +590,10 @@ namespace KK_SceneExplorer
         }
 
         // シーン一覧ダイアログ（SceneLoadScene）が存在する間のみ表示
+        // v3.1.0: シーンモードは activeLoadScene、キャラ/衣装モードは CurrentBrowserMode で判定
         private bool ShouldBeVisible()
         {
+            if (SceneExplorerPlugin.CurrentBrowserMode != SceneExplorerPlugin.BrowserMode.Scene) return true;
             return SceneExplorerPlugin.activeLoadScene != null;
         }
 
@@ -699,10 +701,20 @@ namespace KK_SceneExplorer
             var bottomRect = new Rect(0, contentRect.yMax - BottomBarHeight, fullRect.width, BottomBarHeight);
             var bodyRect = new Rect(contentRect.x, contentRect.y, contentRect.width, contentRect.height - BottomBarHeight);
 
+            // v3.1.0: タイトルをモード別表示
+            string windowTitle;
+            switch (SceneExplorerPlugin.CurrentBrowserMode)
+            {
+                case SceneExplorerPlugin.BrowserMode.CharaFemale: windowTitle = "\u30ad\u30e3\u30e9\u30af\u30bf\u30fc\u30d6\u30e9\u30a6\u30b6\uff08\u5973\uff09"; break; // キャラクターブラウザ（女）
+                case SceneExplorerPlugin.BrowserMode.CharaMale:   windowTitle = "\u30ad\u30e3\u30e9\u30af\u30bf\u30fc\u30d6\u30e9\u30a6\u30b6\uff08\u7537\uff09"; break; // キャラクターブラウザ（男）
+                case SceneExplorerPlugin.BrowserMode.Coordinate:  windowTitle = "\u8863\u88c5\u30d6\u30e9\u30a6\u30b6"; break; // 衣装ブラウザ
+                default: windowTitle = "\u30b7\u30fc\u30f3\u30d6\u30e9\u30a6\u30b6"; break; // シーンブラウザ
+            }
+
             // タイトルバー描画
             if (Event.current.type == EventType.Repaint)
             {
-                _titleBarStyle.Draw(titleRect, "\u2601 \u30b7\u30fc\u30f3\u3092\u958b\u304f", false, false, false, false); // ? シーンを開く
+                _titleBarStyle.Draw(titleRect, "\u2601 " + windowTitle, false, false, false, false); // ☁ + モード別タイトル
             }
 
             DrawToolbar(toolbarRect);
@@ -832,46 +844,54 @@ namespace KK_SceneExplorer
             GUILayout.FlexibleSpace();
 
             // v2.5.4: ボタン幅をFlexibleWidth化（ウィンドウ幅に応じて均等スケール）。ラベル英語化。
+            // v3.1.0: キャラ/衣装モードでは Load のラベルを「追加」に変更
+            string loadLabel = SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.Scene
+                ? "Load"
+                : "\u8ffd\u52a0"; // 追加
             GUI.enabled = _selectedIndex >= 0;
-            if (GUILayout.Button("Load", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
+            if (GUILayout.Button(loadLabel, _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
             {
                 LoadSelected();
             }
             GUI.enabled = true;
 
-            GUI.enabled = _selectedIndex >= 0;
-            if (GUILayout.Button("Import", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
+            // v3.1.0: Import/Delete はシーンモードのみ表示（キャラ/衣装モードでは対象外の操作）
+            if (SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.Scene)
             {
-                ImportSelected();
-            }
-            GUI.enabled = true;
+                GUI.enabled = _selectedIndex >= 0;
+                if (GUILayout.Button("Import", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
+                {
+                    ImportSelected();
+                }
+                GUI.enabled = true;
 
-            // デリート（二段階確認）
-            if (_deleteConfirm)
-            {
-                if (Time.time - _deleteConfirmTime > DeleteResetSeconds)
+                // デリート（二段階確認）
+                if (_deleteConfirm)
                 {
-                    _deleteConfirm = false;
+                    if (Time.time - _deleteConfirmTime > DeleteResetSeconds)
+                    {
+                        _deleteConfirm = false;
+                    }
+                    GUI.backgroundColor = new Color(0.9f, 0.2f, 0.2f);
+                    GUI.enabled = _selectedIndex >= 0;
+                    if (GUILayout.Button("Delete?", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
+                    {
+                        DeleteSelected();
+                        _deleteConfirm = false;
+                    }
+                    GUI.enabled = true;
+                    GUI.backgroundColor = Color.white;
                 }
-                GUI.backgroundColor = new Color(0.9f, 0.2f, 0.2f);
-                GUI.enabled = _selectedIndex >= 0;
-                if (GUILayout.Button("Delete?", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
+                else
                 {
-                    DeleteSelected();
-                    _deleteConfirm = false;
+                    GUI.enabled = _selectedIndex >= 0;
+                    if (GUILayout.Button("Delete", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
+                    {
+                        _deleteConfirm = true;
+                        _deleteConfirmTime = Time.time;
+                    }
+                    GUI.enabled = true;
                 }
-                GUI.enabled = true;
-                GUI.backgroundColor = Color.white;
-            }
-            else
-            {
-                GUI.enabled = _selectedIndex >= 0;
-                if (GUILayout.Button("Delete", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
-                {
-                    _deleteConfirm = true;
-                    _deleteConfirmTime = Time.time;
-                }
-                GUI.enabled = true;
             }
 
             if (GUILayout.Button("Close", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
