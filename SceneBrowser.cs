@@ -164,6 +164,7 @@ namespace KK_SceneExplorer
         {
             public string FilePath;
             public string FileName;
+            public string DisplayName;   // v3.1.0: キャラ名/コーデ名表示用（Scene モードでは FileName と同値）
             public DateTime LastWriteTime;
             public long FileSize;
             public Texture2D Thumbnail;
@@ -1184,9 +1185,11 @@ namespace KK_SceneExplorer
             }
 
             // ファイル名（サムネ直下は2pxの隙間）
+            // v3.1.0: 表示名を優先（キャラ/衣装モードでは名前表示。Scene モードでは FileName と同値）
             float textY = thumbRect.yMax + 2f;
             var nameRect = new Rect(rect.x + 2, textY, rect.width - 4, TextLineHeight);
-            GUI.Label(nameRect, item.FileName, _selectedItemStyle);
+            string displayLabel = string.IsNullOrEmpty(item.DisplayName) ? item.FileName : item.DisplayName;
+            GUI.Label(nameRect, displayLabel, _selectedItemStyle);
 
             // 更新日時
             var dateRect = new Rect(rect.x + 2, nameRect.yMax, rect.width - 4, TextLineHeight);
@@ -1459,11 +1462,16 @@ namespace KK_SceneExplorer
                     string path = files[i];
                     try
                     {
+                        // v3.1.0: モード別にメタデータ検証。失敗（null）なら一覧に含めない（破損カード除外。標準 CharaList と同一仕様）
+                        string displayName = ResolveDisplayName(path);
+                        if (displayName == null) continue;
+
                         var fi = new FileInfo(path);
                         var item = new SceneItem
                         {
                             FilePath = path,
                             FileName = fi.Name,
+                            DisplayName = displayName,
                             LastWriteTime = fi.LastWriteTime,
                             FileSize = fi.Length,
                             Thumbnail = null,
@@ -1482,6 +1490,38 @@ namespace KK_SceneExplorer
             catch (Exception ex)
             {
                 SceneExplorerPlugin.Log.LogError("[SceneBrowser] Scan failed: " + ex.Message);
+            }
+        }
+
+        // v3.1.0: モード別のメタデータ検証。表示名を返す（検証失敗は null = 一覧に含めない）
+        private string ResolveDisplayName(string path)
+        {
+            switch (SceneExplorerPlugin.CurrentBrowserMode)
+            {
+                case SceneExplorerPlugin.BrowserMode.CharaFemale:
+                case SceneExplorerPlugin.BrowserMode.CharaMale:
+                {
+                    byte sex = (byte)((SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.CharaFemale) ? 1 : 0);
+                    try
+                    {
+                        var cf = new ChaFileControl();
+                        if (cf.LoadCharaFile(path, sex, noLoadPng: true)) return cf.parameter.fullname;
+                    }
+                    catch (Exception ex) { SceneExplorerPlugin.Log.LogWarning("キャラ検証失敗: " + path + ": " + ex.Message); }
+                    return null;
+                }
+                case SceneExplorerPlugin.BrowserMode.Coordinate:
+                {
+                    try
+                    {
+                        var cc = new ChaFileCoordinate();
+                        if (cc.LoadFile(path)) return cc.coordinateName;
+                    }
+                    catch (Exception ex) { SceneExplorerPlugin.Log.LogWarning("コーデ検証失敗: " + path + ": " + ex.Message); }
+                    return null;
+                }
+                default:
+                    return System.IO.Path.GetFileName(path);
             }
         }
 
