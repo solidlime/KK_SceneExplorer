@@ -604,8 +604,18 @@ namespace KK_SceneExplorer
             // タイトルバー描画
             if (Event.current.type == EventType.Repaint)
             {
-                _titleBarStyle.Draw(titleRect, "\u2601 \u30b7\u30fc\u30f3\u3092\u958b\u304f", false, false, false, false); // ☁ シーンを開く
+                _titleBarStyle.Draw(titleRect, "\u2601 \u30b7\u30fc\u30f3\u3092\u958b\u304f", false, false, false, false); // ? シーンを開く
             }
+
+            // v3.0.10: デバッグ — サムネ読み込み後の平均輝度を一時表示（読み込み後8秒間）
+            if (LastThumbBrightness >= 0f && Time.realtimeSinceStartup < _brightnessShownUntil)
+            {
+                var dbgStyle = new GUIStyle(GUI.skin.label) { fontSize = 12, alignment = TextAnchor.MiddleCenter };
+                dbgStyle.normal.textColor = Color.yellow;
+                var dbgRect = new Rect(0, titleRect.yMax + 2, fullRect.width, 18);
+                GUI.Label(dbgRect, "Debug: サムネ読み込み後 平均輝度 = " + LastThumbBrightness.ToString("F3"), dbgStyle);
+            }
+
 
             DrawToolbar(toolbarRect);
             DrawSplitContent(bodyRect);
@@ -1485,7 +1495,9 @@ namespace KK_SceneExplorer
             tex.Apply(false);
         }
 
-        // v3.0.9: デバッグ用 — 読み込み後テクスチャの平均輝度をログ出力（初回読み込みのみ。原因切り分け用）
+        // v3.0.10: デバッグ用 — サムネ読み込み後の平均輝度（画面表示＋専用ログファイル。BepInEx ログ設定に依存しない）
+        public static float LastThumbBrightness = -1f;
+        private static float _brightnessShownUntil = 0f;
         private static bool brightnessLogged;
         private static void LogThumbnailBrightness(string path, Texture2D tex)
         {
@@ -1500,11 +1512,20 @@ namespace KK_SceneExplorer
                     avg += 0.2126f * px[i].r + 0.7152f * px[i].g + 0.0722f * px[i].b;
                 }
                 avg /= Mathf.Max(px.Length, 1);
-                SceneExplorerPlugin.Log.LogWarning("[v3.0.9 Debug] サムネ読み込み後: " + Path.GetFileName(path) + " 平均輝度=" + avg.ToString("F3") + " (" + tex.width + "x" + tex.height + ")");
+                LastThumbBrightness = avg;
+                _brightnessShownUntil = Time.realtimeSinceStartup + 8f;
+                string msg = "[v3.0.10 Debug] サムネ読み込み後: " + Path.GetFileName(path) + " 平均輝度=" + avg.ToString("F3") + " (" + tex.width + "x" + tex.height + ")";
+                try
+                {
+                    string root = Path.GetDirectoryName(Application.dataPath);
+                    File.AppendAllText(Path.Combine(root, "KK_SceneExplorer_brightness.log"), msg + Environment.NewLine);
+                }
+                catch { }
+                SceneExplorerPlugin.Log.LogWarning(msg);
             }
             catch (Exception ex)
             {
-                SceneExplorerPlugin.Log.LogWarning("[v3.0.9 Debug] 輝度計測失敗: " + ex.Message);
+                SceneExplorerPlugin.Log.LogWarning("[v3.0.10 Debug] 輝度計測失敗: " + ex.Message);
             }
         }
 
