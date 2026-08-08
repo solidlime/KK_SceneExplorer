@@ -1460,11 +1460,6 @@ namespace KK_SceneExplorer
                     if (!result.LoadImage(data)) return null;
                     // v3.0.9: デバッグ — 読み込み後テクスチャの平均輝度をログ出力（原因切り分け用）
                     LogThumbnailBrightness(path, result);
-                    // v3.0.8: 読み込み時にガンマ・コントラスト補正を適用（Config設定値）
-                    if (result.width > 0 && result.height > 0)
-                    {
-                        ApplyThumbnailBrightness(result, SceneExplorerPlugin.ThumbGamma.Value, SceneExplorerPlugin.ThumbContrast.Value);
-                    }
                     return result;
                 }
             }
@@ -1472,27 +1467,6 @@ namespace KK_SceneExplorer
             {
                 return null;
             }
-        }
-
-        // v3.0.8: サムネイルのガンマ・コントラスト補正。読み込み時に1回だけ適用。
-        private static void ApplyThumbnailBrightness(Texture2D tex, float gamma, float contrast)
-        {
-            Color[] pixels = tex.GetPixels();
-            float exponent = 1f / gamma; // gamma > 1 で明るく（暗部が重点的に持ち上がる）
-            for (int i = 0; i < pixels.Length; i++)
-            {
-                Color c = pixels[i];
-                c.r = Mathf.Pow(c.r, exponent);
-                c.g = Mathf.Pow(c.g, exponent);
-                c.b = Mathf.Pow(c.b, exponent);
-                // コントラスト低減はガンマ適用後
-                c.r = 0.5f + (c.r - 0.5f) * contrast;
-                c.g = 0.5f + (c.g - 0.5f) * contrast;
-                c.b = 0.5f + (c.b - 0.5f) * contrast;
-                pixels[i] = new Color(Mathf.Clamp01(c.r), Mathf.Clamp01(c.g), Mathf.Clamp01(c.b), c.a);
-            }
-            tex.SetPixels(pixels);
-            tex.Apply(false);
         }
 
         // v3.0.10: デバッグ用 — サムネ読み込み後の平均輝度（画面表示＋専用ログファイル。BepInEx ログ設定に依存しない）
@@ -1587,17 +1561,6 @@ namespace KK_SceneExplorer
             }
             _thumbCache.Clear();
             _thumbCacheOrder.Clear();
-        }
-
-        /// <summary>v3.0.7: サムネイルキャッシュをクリアし、全アイテムを再読み込み可能にする（補正設定変更時に呼ぶ）。</summary>
-        public void ResetThumbnailCache()
-        {
-            ClearThumbnailCache();
-            for (int i = 0; i < _items.Count; i++)
-            {
-                _items[i].ThumbLoaded = false;
-                _items[i].Thumbnail = null;
-            }
         }
 
         // ═══════════════════════════════════════════════════════
