@@ -42,6 +42,9 @@ namespace KK_SceneExplorer
 		public static ConfigFile ConfigFile;
 
 		public static ConfigEntry<string> SceneFolders;
+		public static ConfigEntry<string> CharaFolders;
+		public static ConfigEntry<string> CoordinateFolders;
+		public static ConfigEntry<bool> EnableCoordinateBrowser;
 		public static ConfigEntry<KeyboardShortcut> SettingsKey;
 		internal static ConfigEntry<int> FontSize;
 		internal static ConfigEntry<int> BrowserWidth;
@@ -75,6 +78,76 @@ namespace KK_SceneExplorer
 			}
 		}
 
+		/// <summary>v3.2.0: モード対応のルートフォルダ一覧（複数登録対応）。存在するフォルダのみ返す。
+		/// CharaFolders 設定の配下 female/male を女/男タブで自動参照し、設定が空/無効なら UserData 配下の従来パスをフォールバックする。</summary>
+		public static string[] GetModeRootFolders()
+		{
+			switch (CurrentBrowserMode)
+			{
+				case BrowserMode.CharaFemale:
+				case BrowserMode.CharaMale:
+				{
+					string sub = (CurrentBrowserMode == BrowserMode.CharaFemale) ? "female" : "male";
+					List<string> roots = new List<string>();
+					foreach (string baseDir in SplitFolderSettings(CharaFolders.Value))
+					{
+						string resolved = ResolveFolderSetting(baseDir + "\\" + sub);
+						if (resolved != null) roots.Add(resolved);
+					}
+					if (roots.Count == 0)
+					{
+						string fallback = Path.Combine(Path.Combine(UserData.Path, "chara"), sub);
+						if (Directory.Exists(fallback)) roots.Add(fallback);
+					}
+					if (roots.Count == 0)
+						Log.LogWarning("[SceneExplorer] キャラフォルダが見つかりません（CharaFolders 設定を確認してください）: " + CharaFolders.Value);
+					return roots.ToArray();
+				}
+				case BrowserMode.Coordinate:
+				{
+					List<string> roots = new List<string>();
+					foreach (string baseDir in SplitFolderSettings(CoordinateFolders.Value))
+					{
+						string resolved = ResolveFolderSetting(baseDir);
+						if (resolved != null) roots.Add(resolved);
+					}
+					if (roots.Count == 0)
+					{
+						string fallback = Path.Combine(UserData.Path, "coordinate");
+						if (Directory.Exists(fallback)) roots.Add(fallback);
+					}
+					if (roots.Count == 0)
+						Log.LogWarning("[SceneExplorer] 衣装フォルダが見つかりません（CoordinateFolders 設定を確認してください）: " + CoordinateFolders.Value);
+					return roots.ToArray();
+				}
+				default: return new string[0];
+			}
+		}
+
+		/// <summary>v3.2.0: フォルダ設定文字列（セミコロン区切り）を要素に分解する</summary>
+		private static string[] SplitFolderSettings(string raw)
+		{
+			if (string.IsNullOrEmpty(raw)) return new string[0];
+			string[] parts = raw.Split(new[] { ';', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+			List<string> result = new List<string>();
+			foreach (string part in parts)
+			{
+				string trimmed = part.Trim();
+				if (trimmed.Length > 0) result.Add(trimmed);
+			}
+			return result.ToArray();
+		}
+
+		/// <summary>v3.2.0: 設定フォルダを絶対パスに解決。絶対パスならそのまま、相対なら UserData.Path 配下。
+		/// 存在しない場合は null（呼び出し側で除外する）。</summary>
+		private static string ResolveFolderSetting(string path)
+		{
+			if (string.IsNullOrEmpty(path)) return null;
+			path = path.Replace('/', '\\');
+			string full = Path.IsPathRooted(path) ? path : Path.Combine(UserData.Path, path);
+			return Directory.Exists(full) ? full : null;
+		}
+
 		/// <summary>キャラモード要求。CharaList が active になった時に AddButtonCtrl.OnClick Postfix から呼ばれる</summary>
 		public static void RequestCharaMode(Studio.CharaList charaList)
 		{
@@ -88,7 +161,8 @@ namespace KK_SceneExplorer
 				return;
 			}
 			CurrentBrowserMode = (sex == 1) ? BrowserMode.CharaFemale : BrowserMode.CharaMale;
-			CurrentBrowserFolder = GetModeRootFolder();
+			string[] roots = GetModeRootFolders();
+			CurrentBrowserFolder = (roots.Length > 0) ? roots[0] : null;
 			// 非表示は HideModePanels に一本化（スナップショット記録との整合性のため。ちらつき1フレームは許容）
 			Log.LogInfo("[SceneExplorer] Charaモード: " + CurrentBrowserMode + " folder=" + CurrentBrowserFolder);
 		}
@@ -156,6 +230,9 @@ namespace KK_SceneExplorer
 			ThumbSize = Config.Bind("UI", "ThumbSize", 96,
 				new ConfigDescription("サムネイルサイズ（48〜600）", new AcceptableValueRange<int>(48, 600)));
 			TreeSplitPos = Config.Bind("UI", "TreeSplitPos", 240f, "ツリー/グリッド分割位置");
+			EnableCoordinateBrowser = Config.Bind("General", "EnableCoordinateBrowser", false, "衣装ブラウザを使用する（v3.2.0 で一時停止中）");
+			CharaFolders = Config.Bind("General", "CharaFolders", "", "キャラフォルダ（セミコロン区切り）。配下の female/male を女/男タブで自動参照");
+			CoordinateFolders = Config.Bind("General", "CoordinateFolders", "", "衣装フォルダ（セミコロン区切り）");
 
 			HarmonyInstance = new Harmony(GUID);
 			Patches.ApplyAll(HarmonyInstance);
@@ -462,6 +539,48 @@ namespace KK_SceneExplorer
 					statuses[i] = EvaluateFolder(folders[i]);
 				}
 				return statuses;
+			}
+
+			/// <summary>v3.2.0: 汎用フォルダステータス取得（キャラ/衣装設定用）。生のセミコロン区切り文字列から
+			/// 分解し、各フォルダの存在と *.png ファイル数を評価する。</summary>
+			internal static FolderStatus[] GetFolderStatuses(string rawFolders)
+			{
+				if (string.IsNullOrEmpty(rawFolders)) return new FolderStatus[0];
+				string[] parts = rawFolders.Split(new[] { ';', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+				List<FolderStatus> statuses = new List<FolderStatus>();
+				foreach (string part in parts)
+				{
+					string trimmed = part.Trim();
+					if (trimmed.Length == 0) continue;
+					statuses.Add(EvaluateGenericFolder(trimmed));
+				}
+				return statuses.ToArray();
+			}
+
+			private static FolderStatus EvaluateGenericFolder(string original)
+			{
+				FolderStatus status = new FolderStatus();
+				status.OriginalPath = original;
+				status.EffectivePath = null;
+				status.Exists = false;
+				status.FileCount = 0;
+				status.Error = null;
+				try
+				{
+					if (!Directory.Exists(original))
+					{
+						status.Error = "フォルダが見つかりません";
+						return status;
+					}
+					status.EffectivePath = original;
+					status.Exists = true;
+					status.FileCount = Directory.GetFiles(original, "*.png").Length;
+				}
+				catch (Exception ex)
+				{
+					status.Error = ex.Message;
+				}
+				return status;
 			}
 
 			private static FolderStatus EvaluateFolder(string original)
@@ -903,6 +1022,8 @@ namespace KK_SceneExplorer
 				if (__instance == null) return;
 				if (_idx == 4)
 				{
+					// v3.2.0: 衣装ブラウザは一時停止中（false なら標準の衣装リスト動作に戻す）
+					if (!EnableCoordinateBrowser.Value) return;
 					if (!__instance.gameObject.activeInHierarchy) return;
 					if (SceneExplorerPlugin.CurrentBrowserMode == BrowserMode.Coordinate) return;   // キャラ切替での誤再発火ガード
 					SceneExplorerPlugin.CurrentBrowserMode = BrowserMode.Coordinate;
