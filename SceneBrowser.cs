@@ -1316,6 +1316,20 @@ namespace KK_SceneExplorer
             var item = _items[_selectedIndex];
             try
             {
+                // v3.1.0: モード別ロード（キャラ/衣装モードはブラウザを閉じず連続追加可能）
+                switch (SceneExplorerPlugin.CurrentBrowserMode)
+                {
+                    case SceneExplorerPlugin.BrowserMode.CharaFemale:
+                        Studio.Studio.Instance.AddFemale(item.FilePath);
+                        return;
+                    case SceneExplorerPlugin.BrowserMode.CharaMale:
+                        Studio.Studio.Instance.AddMale(item.FilePath);
+                        return;
+                    case SceneExplorerPlugin.BrowserMode.Coordinate:
+                        ApplyCoordinate(item.FilePath);
+                        return;
+                }
+
                 SceneExplorerPlugin.Log.LogInfo("[SceneBrowser] Loading: " + item.FilePath);
                 StartCoroutine(LoadSceneRoutine(item.FilePath));
             }
@@ -1340,6 +1354,22 @@ namespace KK_SceneExplorer
                 SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] シーン読み込み後のダイアログ破棄に失敗: " + ex.Message);
             }
             _loading = false;
+        }
+
+        // v3.1.0: 選択中キャラに衣装を適用（未選択なら何もしない）
+        private void ApplyCoordinate(string path)
+        {
+            var targets = Studio.Studio.GetSelectObjectCtrl();
+            foreach (var obj in targets)
+            {
+                if (obj is Studio.OCIChar oci)
+                {
+                    SceneExplorerPlugin.Log.LogInfo("[SceneBrowser] 衣装適用: " + path + " -> " + oci.treeNodeObject.name);
+                    oci.LoadClothesFile(path);
+                    return;
+                }
+            }
+            SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] 衣装適用対象のキャラが選択されていません: " + path);
         }
 
         private void ImportSelected()
