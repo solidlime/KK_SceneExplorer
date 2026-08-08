@@ -87,6 +87,8 @@ namespace KK_SceneExplorer
         // ── インスタンス状態 ──
         private Rect _windowRect;
         private bool _visible;
+        private bool _eventSystemLocked;              // 現在 EventSystem を無効化中か
+        private bool _prevEventSystemEnabled = true;  // 無効化前の元の状態
         private bool _loading;
         private float _nextCheckTime;
         private bool _stylesReady;
@@ -262,6 +264,26 @@ namespace KK_SceneExplorer
         {
             // 非同期サムネイルロードの結果をメインスレッドで処理（1フレーム最大2件）
             ProcessThumbnailResults();
+
+            // uGUI（スタジオUI）のクリックが後ろに漏れるのを防ぐ:
+            // 表示中は EventSystem を無効化し、非表示になったら元の状態へ復元する。
+            // 状態遷移時のみ操作（フラグ管理）。IMGUI は EventSystem を使わないため本ウィンドウの操作は影響を受けない。
+            if (_visible && !_eventSystemLocked)
+            {
+                var es = UnityEngine.EventSystems.EventSystem.current;
+                if (es != null)
+                {
+                    _prevEventSystemEnabled = es.enabled;
+                    es.enabled = false;
+                    _eventSystemLocked = true;
+                }
+            }
+            else if (!_visible && _eventSystemLocked)
+            {
+                var es = UnityEngine.EventSystems.EventSystem.current;
+                if (es != null) es.enabled = _prevEventSystemEnabled;
+                _eventSystemLocked = false;
+            }
 
             if (_loading) return;
             if (Time.time < _nextCheckTime) return;
@@ -485,6 +507,13 @@ namespace KK_SceneExplorer
 
         private void OnDestroy()
         {
+            // 表示中に破棄された場合の安全策: EventSystem を元の状態に復元
+            if (_eventSystemLocked)
+            {
+                var es = UnityEngine.EventSystems.EventSystem.current;
+                if (es != null) es.enabled = _prevEventSystemEnabled;
+                _eventSystemLocked = false;
+            }
             if (_selectedRowTex != null) Destroy(_selectedRowTex);
             if (_hoverRowTex != null) Destroy(_hoverRowTex);
             if (_splitterTex != null) Destroy(_splitterTex);

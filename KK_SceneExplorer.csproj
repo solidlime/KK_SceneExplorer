@@ -22,6 +22,11 @@
       <HintPath>..\..\Koikatu_Data\Managed\UnityEngine.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- UnityEngine.EventSystems（uGUI 入力ブロック用）は UnityEngine.UI.dll に定義されている -->
+    <Reference Include="UnityEngine.UI">
+      <HintPath>..\..\Koikatu_Data\Managed\UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
   <ItemGroup Condition="'$(Game)' == 'KKS'">
