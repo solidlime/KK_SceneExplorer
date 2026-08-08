@@ -29,7 +29,7 @@ namespace KK_SceneExplorer
         // リセットして再読み込み可能にする（AddToThumbnailCache の追い出し処理と対）
         private const int MaxCacheSize = 300;
         private const float DeleteResetSeconds = 5f;
-        private const float ItemPadX = 6f;
+        private const float ItemPadX = 3f;   // v3.2.2: サムネ左右マージンを半分（6→3）に縮小
         private const float ItemPadY = 6f;
         private const float ItemGap = 4f;
         private const float ItemSpacing = 8f;
@@ -278,15 +278,20 @@ namespace KK_SceneExplorer
             _sortDescending = SceneExplorerPlugin.SortDescending.Value;
 
             // v3.2.1: 最後に開いたシーンフォルダを復元（存在しないパスは無視 = ローカルルートのまま）
-            if (SceneExplorerPlugin.CurrentBrowserFolder == null)
-            {
-                string last = SceneExplorerPlugin.LastFolder.Value;
-                if (!string.IsNullOrEmpty(last))
-                {
-                    if (!System.IO.Path.IsPathRooted(last)) last = System.IO.Path.Combine(UserData.Path, last);
-                    if (System.IO.Directory.Exists(last)) SceneExplorerPlugin.CurrentBrowserFolder = last;
-                }
-            }
+            // v3.2.2: 共通メソッド化（ブラウザ再表示時にも復元されるように CheckFolderChanged からも呼ぶ）
+            TryRestoreLastFolder();
+        }
+
+        // v3.2.2: シーンモードで CurrentBrowserFolder が未設定なら保存済みフォルダを復元する
+        // （モード切替で null にリセットされた後やブラウザを開き直したときにローカルルートへ戻ってしまう問題の修正）
+        private void TryRestoreLastFolder()
+        {
+            if (SceneExplorerPlugin.CurrentBrowserMode != SceneExplorerPlugin.BrowserMode.Scene) return;
+            if (SceneExplorerPlugin.CurrentBrowserFolder != null) return;
+            string last = SceneExplorerPlugin.LastFolder.Value;
+            if (string.IsNullOrEmpty(last)) return;
+            if (!System.IO.Path.IsPathRooted(last)) last = System.IO.Path.Combine(UserData.Path, last);
+            if (System.IO.Directory.Exists(last)) SceneExplorerPlugin.CurrentBrowserFolder = last;
         }
 
         private void Update()
@@ -1452,17 +1457,20 @@ namespace KK_SceneExplorer
             {
                 for (int i = 0; i < targets.Length; i++)
                 {
-                    targets[i].ChangeChara(path);
+                    try { targets[i].ChangeChara(path); }
+                    catch (Exception ex) { SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] キャラ置き換え失敗: " + path + " - " + ex.Message); }
                 }
                 SceneExplorerPlugin.Log.LogInfo("[SceneBrowser] キャラ置き換え: " + path + " x" + targets.Length);
             }
             else if (sex == 1)
             {
-                Studio.Studio.Instance.AddFemale(path);
+                try { Studio.Studio.Instance.AddFemale(path); }
+                catch (Exception ex) { SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] キャラ追加失敗: " + path + " - " + ex.Message); }
             }
             else
             {
-                Studio.Studio.Instance.AddMale(path);
+                try { Studio.Studio.Instance.AddMale(path); }
+                catch (Exception ex) { SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] キャラ追加失敗: " + path + " - " + ex.Message); }
             }
         }
 
@@ -1489,11 +1497,18 @@ namespace KK_SceneExplorer
         // v3.2.1: 常に追加（ボトムバーの Add ボタン用）
         private void AddSelected(string path, int sex)
         {
-            if (sex == 1)
-                Studio.Studio.Instance.AddFemale(path);
-            else
-                Studio.Studio.Instance.AddMale(path);
-            SceneExplorerPlugin.Log.LogInfo("[SceneBrowser] キャラ追加: " + path);
+            try
+            {
+                if (sex == 1)
+                    Studio.Studio.Instance.AddFemale(path);
+                else
+                    Studio.Studio.Instance.AddMale(path);
+                SceneExplorerPlugin.Log.LogInfo("[SceneBrowser] キャラ追加: " + path);
+            }
+            catch (Exception ex)
+            {
+                SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] キャラ追加失敗: " + path + " - " + ex.Message);
+            }
         }
 
         // v3.2.1: 常に置き換え（ボトムバーの Replace ボタン用。同性別キャラ未選択なら警告のみ）
@@ -1507,7 +1522,8 @@ namespace KK_SceneExplorer
             }
             for (int i = 0; i < targets.Length; i++)
             {
-                targets[i].ChangeChara(path);
+                try { targets[i].ChangeChara(path); }
+                catch (Exception ex) { SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] キャラ置き換え失敗: " + path + " - " + ex.Message); }
             }
             SceneExplorerPlugin.Log.LogInfo("[SceneBrowser] キャラ置き換え: " + path + " x" + targets.Length);
         }
@@ -1665,6 +1681,9 @@ namespace KK_SceneExplorer
 
         private void CheckFolderChanged()
         {
+            // v3.2.2: モード切替や再表示で CurrentBrowserFolder が null のままの場合に保存済みフォルダを復元
+            // （復元されると current が変わるため下の不一致判定で RescanFiles が走る）
+            TryRestoreLastFolder();
             string current = GetCurrentBrowserFolder();
             if (!string.Equals(current, _lastScannedFolder, StringComparison.OrdinalIgnoreCase))
             {
@@ -1715,16 +1734,14 @@ namespace KK_SceneExplorer
                     string path = files[i];
                     try
                     {
-                        // v3.1.0: モード別にメタデータ検証。失敗（null）なら一覧に含めない（破損カード除外。標準 CharaList と同一仕様）
-                        string displayName = ResolveDisplayName(path);
-                        if (displayName == null) continue;
-
+                        // v3.2.2: 表示名はファイル名（LoadCharaFile の同期フルパースを一覧で行わない。
+                        // 数百ファイルで「必要mod探索エラー」と遅延が出るため。破損カードはロード時に無視される）
                         var fi = new FileInfo(path);
                         var item = new SceneItem
                         {
                             FilePath = path,
                             FileName = fi.Name,
-                            DisplayName = displayName,
+                            DisplayName = System.IO.Path.GetFileNameWithoutExtension(path),
                             LastWriteTime = fi.LastWriteTime,
                             FileSize = fi.Length,
                             Thumbnail = null,
@@ -1743,38 +1760,6 @@ namespace KK_SceneExplorer
             catch (Exception ex)
             {
                 SceneExplorerPlugin.Log.LogError("[SceneBrowser] Scan failed: " + ex.Message);
-            }
-        }
-
-        // v3.1.0: モード別のメタデータ検証。表示名を返す（検証失敗は null = 一覧に含めない）
-        private string ResolveDisplayName(string path)
-        {
-            switch (SceneExplorerPlugin.CurrentBrowserMode)
-            {
-                case SceneExplorerPlugin.BrowserMode.CharaFemale:
-                case SceneExplorerPlugin.BrowserMode.CharaMale:
-                {
-                    byte sex = (byte)((SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.CharaFemale) ? 1 : 0);
-                    try
-                    {
-                        var cf = new ChaFileControl();
-                        if (cf.LoadCharaFile(path, sex, noLoadPng: true)) return cf.parameter.fullname;
-                    }
-                    catch (Exception ex) { SceneExplorerPlugin.Log.LogWarning("キャラ検証失敗: " + path + ": " + ex.Message); }
-                    return null;
-                }
-                case SceneExplorerPlugin.BrowserMode.Coordinate:
-                {
-                    try
-                    {
-                        var cc = new ChaFileCoordinate();
-                        if (cc.LoadFile(path)) return cc.coordinateName;
-                    }
-                    catch (Exception ex) { SceneExplorerPlugin.Log.LogWarning("コーデ検証失敗: " + path + ": " + ex.Message); }
-                    return null;
-                }
-                default:
-                    return System.IO.Path.GetFileName(path);
             }
         }
 
