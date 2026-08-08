@@ -298,6 +298,31 @@ namespace KK_SceneExplorer
                 if (!_visible) _visible = true;   // ShouldBeVisible は CurrentBrowserMode 基準に拡張される（Task 4）
             }
 
+            // v3.1.0: 衣装モード中はコスチュームタブのコンテンツ（CostumeInfo）を非表示にして SceneBrowser に差し替える
+            if (SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.Coordinate)
+            {
+                var mp = UnityEngine.Object.FindObjectOfType<Studio.MPCharCtrl>();
+                if (mp != null && mp.gameObject.activeInHierarchy)
+                {
+                    // costumeInfo フィールド（private）のルート GameObject を非表示
+                    var fi = HarmonyLib.AccessTools.Field(typeof(Studio.MPCharCtrl), "costumeInfo");
+                    if (fi != null)
+                    {
+                        var ci = fi.GetValue(mp);
+                        if (ci != null)
+                        {
+                            var rootFi = HarmonyLib.AccessTools.Field(ci.GetType(), "objRoot") ?? HarmonyLib.AccessTools.Field(ci.GetType(), "root");
+                            if (rootFi != null)
+                            {
+                                var go = rootFi.GetValue(ci) as UnityEngine.GameObject;
+                                if (go != null && go.activeInHierarchy) go.SetActive(false);
+                            }
+                        }
+                    }
+                }
+                if (!_visible) _visible = true;
+            }
+
             if (_loading) return;
             if (Time.time < _nextCheckTime) return;
             _nextCheckTime = Time.time + CheckInterval;

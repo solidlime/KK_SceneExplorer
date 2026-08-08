@@ -696,6 +696,12 @@ namespace KK_SceneExplorer
 					harmony.Patch(t8, postfix: new HarmonyMethod(AccessTools.Method(typeof(Patches), nameof(AddButtonOnClickPostfix))));
 					Log.LogInfo("パッチ適用: Studio.AddButtonCtrl.OnClick");
 				}
+				MethodInfo t9 = AccessTools.Method(typeof(Studio.MPCharCtrl), "OnClickRoot");
+				if (t9 != null)
+				{
+					harmony.Patch(t9, prefix: new HarmonyMethod(AccessTools.Method(typeof(Patches), nameof(MPCharCtrlOnClickRootPrefix))));
+					Log.LogInfo("パッチ適用: Studio.MPCharCtrl.OnClickRoot");
+				}
 			}
 
 			private static IEnumerable<CodeInstruction> InitInfoTranspiler(IEnumerable<CodeInstruction> instructions)
@@ -870,6 +876,23 @@ namespace KK_SceneExplorer
 				else if (SceneExplorerPlugin.CurrentBrowserMode != BrowserMode.Scene)
 				{
 					SceneExplorerPlugin.RequestSceneMode("タブ切替");
+				}
+			}
+
+			// v3.1.0: コスチュームタブ(_idx==4)で衣装モード開始、それ以外のタブ/閉じ(-1)で解除
+			// パネル非表示中の誤発火（Awake 内 OnClickRoot(select) 等）は activeInHierarchy でガード
+			private static void MPCharCtrlOnClickRootPrefix(Studio.MPCharCtrl __instance, int _idx)
+			{
+				if (__instance == null || !__instance.gameObject.activeInHierarchy) return;
+				if (_idx == 4)
+				{
+					SceneExplorerPlugin.CurrentBrowserMode = BrowserMode.Coordinate;
+					SceneExplorerPlugin.CurrentBrowserFolder = SceneExplorerPlugin.GetModeRootFolder();
+					SceneExplorerPlugin.Log.LogInfo("[SceneExplorer] Coordinateモード開始 folder=" + SceneExplorerPlugin.CurrentBrowserFolder);
+				}
+				else if (SceneExplorerPlugin.CurrentBrowserMode == BrowserMode.Coordinate)
+				{
+					SceneExplorerPlugin.RequestSceneMode("コスチュームタブ切替");
 				}
 			}
 
