@@ -1612,8 +1612,9 @@ namespace KK_SceneExplorer
             if (string.IsNullOrEmpty(basePath))
             {
                 // v3.2.0: モード中に CurrentBrowserFolder が null（モードルートが空 = 設定ミス）なら、
-                // シーンルート（GetBrowserBasePath）をフォールバック走査してキャラカードを無駄パースしないよう空一覧で終了
-                if (SceneExplorerPlugin.GetModeRootFolders().Length > 0)
+                // シーンルート（GetBrowserBasePath）をフォールバック走査してキャラカードを無駄パースしないよう空一覧で終了。
+                // 判定はモード中かどうか（ルートが空でもモード中ならフォールバックしない）
+                if (SceneExplorerPlugin.CurrentBrowserMode != SceneExplorerPlugin.BrowserMode.Scene)
                 {
                     SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] モードルートが空のため一覧を空にします（フォルダ設定を確認してください）");
                     return;
