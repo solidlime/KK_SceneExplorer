@@ -658,7 +658,7 @@ namespace KK_SceneExplorer
 
             // サムネサイズスライダー（v3.0.2: 変更を設定に書き戻し、次回起動時に復元）
             GUILayout.Label("\u30b5\u30e0\u30cd:", GUILayout.Width(FontSliderLabelWidth)); // サムネ:
-            float newThumb = GUILayout.HorizontalSlider(_thumbSize, 48f, 480f, GUILayout.Width(SliderWidth));
+            float newThumb = GUILayout.HorizontalSlider(_thumbSize, 48f, 600f, GUILayout.Width(SliderWidth));
             if (Mathf.Abs(newThumb - _thumbSize) > 0.5f)
             {
                 _thumbSize = newThumb;
@@ -1448,10 +1448,10 @@ namespace KK_SceneExplorer
                     int width = 0;
                     int height = 0;
                     Texture2D result = PngAssist.ChangeTextureFromPngByte(data, ref width, ref height);
-                    // v3.0.6: 読み込み時に明るさ・コントラスト補正を適用
+                    // v3.0.7: 読み込み時に明るさ・コントラスト補正を適用（Config設定値）
                     if (result != null && result.width > 0 && result.height > 0)
                     {
-                        ApplyThumbnailBrightness(result, 1.08f, 0.90f);
+                        ApplyThumbnailBrightness(result, SceneExplorerPlugin.ThumbBrightness.Value, SceneExplorerPlugin.ThumbContrast.Value);
                     }
                     return result;
                 }
@@ -1536,6 +1536,17 @@ namespace KK_SceneExplorer
             }
             _thumbCache.Clear();
             _thumbCacheOrder.Clear();
+        }
+
+        /// <summary>v3.0.7: サムネイルキャッシュをクリアし、全アイテムを再読み込み可能にする（補正設定変更時に呼ぶ）。</summary>
+        public void ResetThumbnailCache()
+        {
+            ClearThumbnailCache();
+            for (int i = 0; i < _items.Count; i++)
+            {
+                _items[i].ThumbLoaded = false;
+                _items[i].Thumbnail = null;
+            }
         }
 
         // ═══════════════════════════════════════════════════════

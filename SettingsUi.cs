@@ -104,6 +104,32 @@ namespace KK_SceneExplorer
 				SceneExplorerPlugin.ResetBrowserStyles();
 			}
 
+			// v3.0.7: サムネイル明るさスライダー
+			GUILayout.BeginHorizontal();
+			GUILayout.Label("サムネ明るさ");
+			float newBrightness = GUILayout.HorizontalSlider(SceneExplorerPlugin.ThumbBrightness.Value, 0.8f, 1.5f, GUILayout.Width(200));
+			GUILayout.Label(newBrightness.ToString("F2"));
+			GUILayout.EndHorizontal();
+			if (Mathf.Abs(newBrightness - SceneExplorerPlugin.ThumbBrightness.Value) > 0.001f)
+			{
+				SceneExplorerPlugin.ThumbBrightness.Value = newBrightness;
+				SceneExplorerPlugin.ConfigFile.Save();
+				SceneExplorerPlugin.ResetThumbnailBrightness();
+			}
+
+			// v3.0.7: サムネイルコントラストスライダー
+			GUILayout.BeginHorizontal();
+			GUILayout.Label("サムネコントラスト");
+			float newContrast = GUILayout.HorizontalSlider(SceneExplorerPlugin.ThumbContrast.Value, 0.7f, 1.1f, GUILayout.Width(200));
+			GUILayout.Label(newContrast.ToString("F2"));
+			GUILayout.EndHorizontal();
+			if (Mathf.Abs(newContrast - SceneExplorerPlugin.ThumbContrast.Value) > 0.001f)
+			{
+				SceneExplorerPlugin.ThumbContrast.Value = newContrast;
+				SceneExplorerPlugin.ConfigFile.Save();
+				SceneExplorerPlugin.ResetThumbnailBrightness();
+			}
+
 			GUILayout.Space(8);
 			GUILayout.Label("パスはスラッシュ(/)区切りで入力してください（例: //nas/Data/test）。バックスラッシュ形式に自動変換されます");
 			GUILayout.Label("「シーンを開く」ダイアログ表示中はツリーが自動表示されます（ローカルとネットワークを一つのツリーでブラウズ）。選んだフォルダのシーンのみ一覧に出ます");
