@@ -297,6 +297,7 @@ namespace KK_SceneExplorer
             {
                 cl.gameObject.SetActive(false);
                 if (!_visible) _visible = true;   // ShouldBeVisible は CurrentBrowserMode 基準に拡張される（Task 4）
+                RescanFiles();   // v3.1.0: モードルートの一覧を読み直し
             }
 
             // v3.1.0: 衣装モード中はコスチュームタブのコンテンツ（CostumeInfo）を非表示にして SceneBrowser に差し替える
@@ -322,6 +323,7 @@ namespace KK_SceneExplorer
                     }
                 }
                 if (!_visible) _visible = true;
+                RescanFiles();   // v3.1.0: モードルートの一覧を読み直し
             }
 
             if (_loading) return;
@@ -1450,6 +1452,11 @@ namespace KK_SceneExplorer
             {
                 basePath = SceneExplorerPlugin.GetBrowserBasePath();
             }
+            // v3.1.0: モードルートは相対パス（例: "chara/female"）で設定されるため、フルパスへ解決
+            if (SceneExplorerPlugin.GetModeRootFolder() != null && !Path.IsPathRooted(basePath))
+            {
+                basePath = Path.Combine(UserData.Path, basePath);
+            }
             if (string.IsNullOrEmpty(basePath) || !Directory.Exists(basePath)) return;
 
             try
@@ -1828,6 +1835,16 @@ namespace KK_SceneExplorer
 
         private void SelectFolder(string path)
         {
+            // v3.1.0: キャラ/衣装モードではモードルートより上へ移動させない
+            string modeRoot = SceneExplorerPlugin.GetModeRootFolder();
+            if (modeRoot != null)
+            {
+                // 計画書の UserData.Path + modeRoot を Path.Combine で堅牢化（UserData.Path の末尾セパレータ非依存）
+                string rootFull = Path.Combine(UserData.Path, modeRoot);
+                if (!path.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase))
+                    path = rootFull;
+            }
+
             // プラグイン側のフィールドを更新（別タスクで実装）
             SceneExplorerPlugin.CurrentBrowserFolder = path;
             RescanFiles();
