@@ -1011,10 +1011,18 @@ namespace KK_SceneExplorer
             ApplyScrollbarSkin();
             _gridScroll = GUI.BeginScrollView(viewRect, _gridScroll, contentRect);
 
-            int itemIndex = 0;
-            for (int row = 0; row < rows; row++)
+            // 可視範囲カリング: スクロール位置から可視行のみ描画（全件ループ廃止）。
+            // contentRect は全件分のまま（スクロールバー計算のため変更しない）。
+            // Layout/Repaint 間で _gridScroll が変わらないため、上下1行バッファで一貫描画になる。
+            float rowH = cellH + ItemSpacing;
+            int firstRow = Mathf.Max(0, Mathf.FloorToInt(_gridScroll.y / rowH) - 1);
+            int lastRow = Mathf.Min(rows - 1, Mathf.CeilToInt((_gridScroll.y + viewRect.height) / rowH) + 1);
+
+            for (int row = firstRow; row <= lastRow; row++)
             {
-                for (int col = 0; col < cols && itemIndex < totalItems; col++, itemIndex++)
+                int itemIndex = row * cols;
+                int maxCol = Mathf.Min(cols, totalItems - itemIndex);
+                for (int col = 0; col < maxCol; col++, itemIndex++)
                 {
                     float x = col * (cellW + ItemSpacing);
                     float y = row * (cellH + ItemSpacing) + ItemPadY;
