@@ -7,6 +7,7 @@ using System.Reflection;
 using System.Threading;
 using Manager;
 using UnityEngine;
+using UnityEngine.UI;   // v3.3.1: 透明 uGUI ブロックレイヤー（Canvas/Image/GraphicRaycaster）
 
 #pragma warning disable CS0414 // フィールド割当済みだが未使用
 
@@ -88,9 +89,11 @@ namespace KK_SceneExplorer
         // ── インスタンス状態 ──
         private Rect _windowRect;
         private bool _visible;
-        private bool _eventSystemLocked;              // 現在 EventSystem を無効化中か
-        private bool _prevEventSystemEnabled = true;  // 無効化前の元の状態
-        private UnityEngine.EventSystems.EventSystem _lockedEventSystem; // 無効化した EventSystem の参照（current は無効化で null になるため保持が必要）
+        // v3.3.1: 透明 uGUI ブロックレイヤー（ウィンドウ矩形に追従し、ウィンドウ内の背後 uGUI のみクリックをブロック。
+        // ウィンドウ外はゲーム操作可能。旧 EventSystem ロック + IMGUI 吸収レイヤー方式から置き換え）
+        private GameObject _blockLayer;
+        private Canvas _blockCanvas;
+        private RectTransform _blockRect;
         private bool _loading;
         private float _nextCheckTime;
         private bool _stylesReady;
@@ -282,6 +285,9 @@ namespace KK_SceneExplorer
             // v3.2.1: 最後に開いたシーンフォルダを復元（存在しないパスは無視 = ローカルルートのまま）
             // v3.2.2: 共通メソッド化（ブラウザ再表示時にも復元されるように CheckFolderChanged からも呼ぶ）
             TryRestoreLastFolder();
+
+            // v3.3.1: 透明 uGUI ブロックレイヤーを生成（ブラウザ非表示中は Canvas 無効のまま）
+            EnsureBlockLayer();
             }
             catch (Exception ex)
             {
@@ -326,27 +332,9 @@ namespace KK_SceneExplorer
             // 非同期サムネイルロードの結果をメインスレッドで処理（1フレーム最大2件）
             ProcessThumbnailResults();
 
-            // uGUI（スタジオUI）のクリックが後ろに漏れるのを防ぐ:
-            // 表示中は EventSystem を無効化し、非表示になったら元の状態へ復元する。
-            // 状態遷移時のみ操作（フラグ管理）。IMGUI は EventSystem を使わないため本ウィンドウの操作は影響を受けない。
-            if (_visible && !_eventSystemLocked)
-            {
-                var es = UnityEngine.EventSystems.EventSystem.current;
-                if (es != null)
-                {
-                    _prevEventSystemEnabled = es.enabled;
-                    _lockedEventSystem = es;   // current は無効化（OnDisable）で null になるため参照を保持
-                    es.enabled = false;
-                    _eventSystemLocked = true;
-                }
-            }
-            else if (!_visible && _eventSystemLocked)
-            {
-                // 保持した参照から直接復元（EventSystem.current は無効化中は null のため使えない）
-                if (_lockedEventSystem != null) _lockedEventSystem.enabled = _prevEventSystemEnabled;
-                _lockedEventSystem = null;
-                _eventSystemLocked = false;
-            }
+            // v3.3.1: 透明 uGUI ブロックレイヤーをウィンドウ矩形に追従させる。
+            // ウィンドウ内の背後 uGUI のみクリックブロック（ウィンドウ外はゲーム操作可能）。
+            UpdateBlockLayer();
 
             // v3.1.0: ブラウザモード遷移の検出と1回限りの初期化
             // RequestCharaMode / MPCharCtrlOnClickRootPrefix 側で CurrentBrowserMode が切り替わるため、
@@ -413,6 +401,63 @@ namespace KK_SceneExplorer
             }
         }
 
+        // v3.3.1: 透明 uGUI ブロックレイヤーの生成。
+        // ウィンドウ矩形に追従する ScreenSpaceOverlay の透明 Image で、ウィンドウ内の背後 uGUI のみ
+        // クリックをブロックする（ウィンドウ外は EventSystem を解放し、ゲーム操作を可能にする）。
+        // CanvasScaler は付けない（scaleFactor=1 → ピクセル座標 = Canvas 座標で扱える）。
+        private void EnsureBlockLayer()
+        {
+            if (_blockCanvas != null) return;
+            try
+            {
+                var go = new GameObject("SceneExplorerModalBlock");
+                go.transform.SetParent(transform, false);
+                _blockLayer = go;
+                _blockCanvas = go.AddComponent<Canvas>();
+                _blockCanvas.renderMode = RenderMode.ScreenSpaceOverlay;
+                _blockCanvas.sortingOrder = 9999;   // スタジオUIの最前面に重ねる
+                _blockCanvas.enabled = false;       // ブラウザ非表示中はブロックしない
+                // ScreenSpaceOverlay Canvas の RectTransform は Unity が常に全画面サイズに固定するため、
+                // Image は子 GameObject に置き、その RectTransform をウィンドウ矩形に合わせる。
+                var imgGo = new GameObject("BlockImage");
+                imgGo.transform.SetParent(go.transform, false);
+                var img = imgGo.AddComponent<Image>();
+                img.color = new Color(0f, 0f, 0f, 0f);   // 完全透明（描画はされない）
+                img.raycastTarget = true;
+                go.AddComponent<GraphicRaycaster>();
+                _blockRect = imgGo.GetComponent<RectTransform>();
+            }
+            catch (Exception ex)
+            {
+                SceneExplorerPlugin.Log.LogWarning("uGUI ブロックレイヤーの生成に失敗しました: " + ex.Message);
+            }
+        }
+
+        // v3.3.1: ブロックレイヤーをウィンドウ矩形に追従させる。
+        // IMGUI は左上原点、uGUI ScreenSpaceOverlay は左下原点なので y を反転する。
+        private void UpdateBlockLayer()
+        {
+            if (_blockCanvas == null) return;
+            if (_visible)
+            {
+                if (!_blockCanvas.enabled) _blockCanvas.enabled = true;
+                float x = _windowRect.x;
+                float y = _windowRect.y;
+                float w = _windowRect.width;
+                float h = _windowRect.height;
+                _blockRect.anchorMin = Vector2.zero;
+                _blockRect.anchorMax = Vector2.zero;
+                _blockRect.pivot = Vector2.zero;
+                // 親 Canvas（全画面・左下原点）に対する相対座標で指定する
+                _blockRect.anchoredPosition = new Vector2(x, Screen.height - (y + h));
+                _blockRect.sizeDelta = new Vector2(w, h);
+            }
+            else if (_blockCanvas.enabled)
+            {
+                _blockCanvas.enabled = false;
+            }
+        }
+
         private void OnGUI()
         {
             // v2.1.1: 終了確認・確認ダイアログ（StudioExit/StudioCheck）表示中は
@@ -447,43 +492,8 @@ namespace KK_SceneExplorer
             // v2.0.6: 他プラグインがPopし忘れたGUIClipスタックを剥がす（クリップリーク対策）
             ResetClipLeak();
 
-            // v3.0.1: モーダル化 — ウィンドウ外のみクリック吸収（ウィンドウ内操作を妨げない）。
-            // 全画面1枚のButtonはUnity 5.6でウィンドウ内のMouseDownも消費して操作不能になるため、
-            // ウィンドウRect（8px拡張）の外側を4分割した矩形にButtonを配置する。
-            GUI.depth = 0;
-            GUI.color = new Color(0, 0, 0, 0);
-            GUI.backgroundColor = new Color(0, 0, 0, 0);
-            {
-                float margin = 8f;
-                float wx = _windowRect.x - margin;
-                float wy = _windowRect.y - margin;
-                float ww = _windowRect.width + margin * 2f;
-                float wh = _windowRect.height + margin * 2f;
-                float sw = (float)Screen.width;
-                float sh = (float)Screen.height;
-
-                // 上: ウィンドウの上端より上
-                float topH = Mathf.Max(0f, wy);
-                if (topH > 0f) GUI.Button(new Rect(0f, 0f, sw, topH), _clearTex);
-
-                // 下: ウィンドウの下端より下
-                float bottomY = wy + wh;
-                float bottomH = Mathf.Max(0f, sh - bottomY);
-                if (bottomH > 0f) GUI.Button(new Rect(0f, bottomY, sw, bottomH), _clearTex);
-
-                // 左: ウィンドウ左端より左（上・下を除く高さ）
-                float sideY = wy;
-                float sideH = wh;
-                float leftW = Mathf.Max(0f, wx);
-                if (leftW > 0f) GUI.Button(new Rect(0f, sideY, leftW, sideH), _clearTex);
-
-                // 右: ウィンドウ右端より右（上・下を除く高さ）
-                float rightX = wx + ww;
-                float rightW = Mathf.Max(0f, sw - rightX);
-                if (rightW > 0f) GUI.Button(new Rect(rightX, sideY, rightW, sideH), _clearTex);
-            }
-            GUI.color = Color.white;
-            GUI.backgroundColor = Color.white;
+            // v3.3.1: IMGUI 吸収レイヤーは撤去（ウィンドウ外もゲーム操作可能にするため）。
+            // ウィンドウ内の背後 uGUI のブロックは透明 uGUI ブロックレイヤー（UpdateBlockLayer）が担う。
 
             // 最前面に描画（他プラグインのIMGUIウィンドウに覆われないように。GUI.depthは小さいほど前面）
             GUI.depth = -1000;
@@ -624,13 +634,10 @@ namespace KK_SceneExplorer
 
         private void OnDestroy()
         {
-            // 表示中に破棄された場合の安全策: EventSystem を元の状態に復元
-            if (_eventSystemLocked)
-            {
-                if (_lockedEventSystem != null) _lockedEventSystem.enabled = _prevEventSystemEnabled;
-                _lockedEventSystem = null;
-                _eventSystemLocked = false;
-            }
+            // v3.3.1: 透明 uGUI ブロックレイヤーを破棄
+            if (_blockLayer != null) Destroy(_blockLayer);
+            _blockCanvas = null;
+            _blockRect = null;
             if (_selectedRowTex != null) Destroy(_selectedRowTex);
             if (_hoverRowTex != null) Destroy(_hoverRowTex);
             if (_splitterTex != null) Destroy(_splitterTex);
@@ -2178,10 +2185,10 @@ namespace KK_SceneExplorer
             // プラグイン側のフィールドを更新（別タスクで実装）
             SceneExplorerPlugin.CurrentBrowserFolder = path;
             // v3.2.1: シーンモードでのみ最後に開いたフォルダを記憶（モードルートをシーンの記憶と混ぜない）
-            // v3.3.0: バックスラッシュをエスケープして保存（BepInEx のエスケープ解釈で \n 等が制御文字化するのを防ぐ）
+            // v3.3.1: バックスラッシュはエスケープせずそのまま保存（読込時に BepInEx がデコード、正規化で補正）
             if (SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.Scene)
             {
-                SceneExplorerPlugin.LastFolder.Value = SceneExplorerPlugin.EscapeConfigPath(path);
+                SceneExplorerPlugin.LastFolder.Value = path;
                 SceneExplorerPlugin.ConfigFile.Save();
             }
             RescanFiles();

@@ -1,11 +1,15 @@
+using System;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.UI;   // v3.3.1: 透明 uGUI ブロックレイヤー（Canvas/Image/GraphicRaycaster）
 
 namespace KK_SceneExplorer
 {
 	public class SettingsUi : MonoBehaviour
 	{
-		private Rect windowRect = new Rect(20, 20, 480, 400);
+		private const int WindowId = 981234;
+
+		private Rect windowRect = new Rect(20, 20, 600, 400);
 		private bool visible;
 		private string newScenePath = "";
 		private string newCharaPath = "";
@@ -17,6 +21,48 @@ namespace KK_SceneExplorer
 		private bool needRefresh = true;
 
 		private bool wasDown;
+
+		// ── v3.3.1: 透明 uGUI ブロックレイヤー（SceneBrowser と同一パターン）──
+		private GameObject _blockLayer;
+		private Canvas _blockCanvas;
+		private RectTransform _blockRect;
+
+		// ── 静的テクスチャ（SceneBrowser と同じ配色）──
+		private static Texture2D _windowBgTex;
+		private static Texture2D _titleBarTex;
+
+		// ── スタイル ──
+		private bool _stylesReady;
+		private GUIStyle _titleBarStyle;
+		private GUIStyle _sectionHeaderStyle;
+		private GUIStyle _buttonStyle;
+
+		// ── フォント連動 ──
+		private float FontSizeVal { get { return (float)SceneExplorerPlugin.FontSize.Value; } }
+		private float TextLineHeight { get { return Mathf.Ceil(FontSizeVal * 1.4f); } }
+		private float TitleBarHeight { get { return TextLineHeight + 8f; } }
+
+		private void Awake()
+		{
+			try
+			{
+				// テクスチャ生成（SceneBrowser と同一配色）
+				_windowBgTex = new Texture2D(1, 1);
+				_windowBgTex.SetPixel(0, 0, new Color(0.503f, 0.542f, 0.629f, 0.94f)); // SceneBrowser._windowBgTex と同一
+				_windowBgTex.Apply();
+
+				_titleBarTex = new Texture2D(1, 1);
+				_titleBarTex.SetPixel(0, 0, new Color(0.435f, 0.481f, 0.581f, 1f)); // SceneBrowser._titleBarTex と同一
+				_titleBarTex.Apply();
+
+				// v3.3.1: 透明 uGUI ブロックレイヤーを生成（非表示中は Canvas 無効のまま）
+				EnsureBlockLayer();
+			}
+			catch (Exception ex)
+			{
+				SceneExplorerPlugin.Log.LogWarning("SettingsUi Awake で例外が発生しました: " + ex);
+			}
+		}
 
 		private void Update()
 		{
@@ -30,20 +76,171 @@ namespace KK_SceneExplorer
 				}
 			}
 			wasDown = down;
+
+			// v3.3.1: ブロックレイヤーをウィンドウ矩形に追従させる
+			UpdateBlockLayer();
 		}
+
+		// ═══════════════════════════════════════════════════════
+		// 透明 uGUI ブロックレイヤー（SceneBrowser.cs から移植）
+		// ═══════════════════════════════════════════════════════
+
+		/// <summary>
+		/// 透明 uGUI ブロックレイヤーの生成。
+		/// ウィンドウ矩形に追従する ScreenSpaceOverlay の透明 Image で、
+		/// ウィンドウ内の背後 uGUI のみクリックをブロックする（ウィンドウ外はゲーム操作可能）。
+		/// </summary>
+		private void EnsureBlockLayer()
+		{
+			if (_blockCanvas != null) return;
+			try
+			{
+				var go = new GameObject("SceneExplorerSettingsBlock");
+				go.transform.SetParent(transform, false);
+				_blockLayer = go;
+				_blockCanvas = go.AddComponent<Canvas>();
+				_blockCanvas.renderMode = RenderMode.ScreenSpaceOverlay;
+				_blockCanvas.sortingOrder = 9999;
+				_blockCanvas.enabled = false;       // 非表示中はブロックしない
+				// ScreenSpaceOverlay Canvas の RectTransform は Unity が常に全画面サイズに固定するため、
+				// Image は子 GameObject に置き、その RectTransform をウィンドウ矩形に合わせる。
+				var imgGo = new GameObject("BlockImage");
+				imgGo.transform.SetParent(go.transform, false);
+				var img = imgGo.AddComponent<Image>();
+				img.color = new Color(0f, 0f, 0f, 0f);   // 完全透明（描画はされない）
+				img.raycastTarget = true;
+				go.AddComponent<GraphicRaycaster>();
+				_blockRect = imgGo.GetComponent<RectTransform>();
+			}
+			catch (Exception ex)
+			{
+				SceneExplorerPlugin.Log.LogWarning("uGUI ブロックレイヤーの生成に失敗しました: " + ex.Message);
+			}
+		}
+
+		/// <summary>
+		/// ブロックレイヤーをウィンドウ矩形に追従させる。
+		/// IMGUI は左上原点、uGUI ScreenSpaceOverlay は左下原点なので y を反転する。
+		/// </summary>
+		private void UpdateBlockLayer()
+		{
+			if (_blockCanvas == null) return;
+			if (visible)
+			{
+				if (!_blockCanvas.enabled) _blockCanvas.enabled = true;
+				float x = windowRect.x;
+				float y = windowRect.y;
+				float w = windowRect.width;
+				float h = windowRect.height;
+				_blockRect.anchorMin = Vector2.zero;
+				_blockRect.anchorMax = Vector2.zero;
+				_blockRect.pivot = Vector2.zero;
+				_blockRect.anchoredPosition = new Vector2(x, Screen.height - (y + h));
+				_blockRect.sizeDelta = new Vector2(w, h);
+			}
+			else if (_blockCanvas.enabled)
+			{
+				_blockCanvas.enabled = false;
+			}
+		}
+
+		private void OnDestroy()
+		{
+			// v3.3.1: 透明 uGUI ブロックレイヤーを破棄
+			if (_blockLayer != null) Destroy(_blockLayer);
+			_blockCanvas = null;
+			_blockRect = null;
+			if (_windowBgTex != null) Destroy(_windowBgTex);
+			if (_titleBarTex != null) Destroy(_titleBarTex);
+		}
+
+		// ═══════════════════════════════════════════════════════
+		// スタイル初期化（OnGUI初回のみ、SceneBrowser と同一配色）
+		// ═══════════════════════════════════════════════════════
+
+		private void InitStylesOnce()
+		{
+			if (_stylesReady) return;
+
+			var skin = GUI.skin;
+			int fs = SceneExplorerPlugin.FontSize.Value;
+
+			// タイトルバー（SceneBrowser._titleBarStyle と同一）
+			_titleBarStyle = new GUIStyle(skin.label);
+			_titleBarStyle.normal.background = _titleBarTex;
+			_titleBarStyle.normal.textColor = new Color(0.88f, 0.89f, 0.92f);
+			_titleBarStyle.fontSize = fs;
+			_titleBarStyle.alignment = TextAnchor.MiddleLeft;
+			_titleBarStyle.padding = new RectOffset(8, 8, 4, 4);
+
+			// セクション見出し
+			_sectionHeaderStyle = new GUIStyle(skin.label);
+			_sectionHeaderStyle.normal.textColor = new Color(0.88f, 0.89f, 0.92f);
+			_sectionHeaderStyle.fontSize = fs;
+			_sectionHeaderStyle.fontStyle = FontStyle.Bold;
+
+			// ボタン（SceneBrowser._toolbarButtonStyle と同系列）
+			_buttonStyle = new GUIStyle(skin.button);
+			_buttonStyle.fontSize = fs;
+			_buttonStyle.padding = new RectOffset(8, 8, 4, 4);
+
+			_stylesReady = true;
+		}
+
+		/// <summary>フォントサイズ変更を反映するため、次回OnGUIでスタイルを再生成させる。</summary>
+		public void RefreshStyles()
+		{
+			_stylesReady = false;
+		}
+
+		// ═══════════════════════════════════════════════════════
+		// OnGUI
+		// ═══════════════════════════════════════════════════════
 
 		private void OnGUI()
 		{
-			if (!visible)
-			{
-				return;
-			}
-			windowRect = GUI.Window(981234, windowRect, DrawWindow, "フォルダ設定（シーン / キャラ / 衣装）");
+			if (!visible) return;
+
+			// 他プラグインが GUI.matrix に残した変換を強制リセット
+			GUI.matrix = Matrix4x4.identity;
+
+			InitStylesOnce();
+
+			// 最前面に描画
+			GUI.depth = -999;
+
+			// フォントサイズに応じてウィンドウ幅を動的調整（fs=20→600px, fs=32→960px）
+			windowRect.width = Mathf.Max(580f, SceneExplorerPlugin.FontSize.Value * 30f);
+
+			windowRect = GUI.Window(WindowId, windowRect, DrawWindow, "");
 		}
 
 		private void DrawWindow(int id)
 		{
-			GUI.DragWindow(new Rect(0, 0, 10000, 20));
+			float w = windowRect.width;
+			float h = windowRect.height;
+			var fullRect = new Rect(0, 0, w, h);
+
+			// ウィンドウ背景（SceneBrowser と同一）
+			if (Event.current.type == EventType.Repaint)
+			{
+				GUI.DrawTexture(fullRect, _windowBgTex, ScaleMode.StretchToFill);
+			}
+
+			// タイトルバー（SceneBrowser と同一描画パターン）
+			var titleRect = new Rect(0, 0, fullRect.width, TitleBarHeight);
+			if (Event.current.type == EventType.Repaint)
+			{
+				_titleBarStyle.Draw(titleRect, "☁ フォルダ設定（シーン / キャラ / 衣装）", false, false, false, false);
+			}
+
+			// ドラッグ領域: タイトルバー全体
+			GUI.DragWindow(titleRect);
+
+			// コンテンツ領域（タイトルバー下）
+			var contentRect = new Rect(0, titleRect.yMax, fullRect.width, fullRect.height - titleRect.yMax);
+
+			GUILayout.BeginArea(contentRect);
 
 			if (needRefresh)
 			{
@@ -54,7 +251,7 @@ namespace KK_SceneExplorer
 			scroll = GUILayout.BeginScrollView(scroll);
 
 			// ── シーン ──
-			GUILayout.Label("シーン（ローカル: UserData\\studio\\scene は常に参照）");
+			GUILayout.Label("シーン（ローカル: UserData\\studio\\scene は常に参照）", _sectionHeaderStyle);
 			DrawFolderSection(ref newScenePath, cachedSceneStatuses,
 				new List<string>(SceneExplorerPlugin.ScenePaths.GetConfiguredSceneFolders()),
 				SaveSceneFolders);
@@ -62,8 +259,7 @@ namespace KK_SceneExplorer
 			GUILayout.Space(10);
 
 			// ── キャラ ──
-			GUILayout.Label("キャラ（配下の female/male を女/男タブで自動参照）");
-			GUILayout.Label("キャラフォルダの配下 female/male を女/男タブで自動参照します", HelpStyle());
+			GUILayout.Label("キャラ（配下の female/male を女/男タブで自動参照）", _sectionHeaderStyle);
 			DrawFolderSection(ref newCharaPath, cachedCharaStatuses,
 				SplitRaw(SceneExplorerPlugin.CharaFolders.Value),
 				SaveCharaFolders);
@@ -71,50 +267,32 @@ namespace KK_SceneExplorer
 			GUILayout.Space(10);
 
 			// ── 衣装 ──
-			GUILayout.Label("衣装（直下を参照）");
-			GUILayout.Label("衣装フォルダ直下を参照します", HelpStyle());
+			GUILayout.Label("衣装（直下を参照）", _sectionHeaderStyle);
 			DrawFolderSection(ref newCoordinatePath, cachedCoordinateStatuses,
 				SplitRaw(SceneExplorerPlugin.CoordinateFolders.Value),
 				SaveCoordinateFolders);
 
 			GUILayout.EndScrollView();
 
-			if (GUILayout.Button("再スキャン"))
+			if (GUILayout.Button("再スキャン", _buttonStyle))
 			{
 				needRefresh = true;
 			}
 
 			GUILayout.BeginHorizontal();
-			GUILayout.Label("フォントサイズ");
-			int newFontSize = (int)GUILayout.HorizontalSlider((float)SceneExplorerPlugin.FontSize.Value, 8f, 32f, GUILayout.Width(200));
-			GUILayout.Label(newFontSize.ToString());
+			GUILayout.Label("フォントサイズ", GUILayout.Width(Mathf.Max(80, SceneExplorerPlugin.FontSize.Value * 5)));
+			int newFontSize = (int)GUILayout.HorizontalSlider((float)SceneExplorerPlugin.FontSize.Value, 8f, 32f);
+			GUILayout.Label(newFontSize.ToString(), GUILayout.Width(40));
 			GUILayout.EndHorizontal();
 			if (newFontSize != SceneExplorerPlugin.FontSize.Value)
 			{
 				SceneExplorerPlugin.FontSize.Value = newFontSize;
 				SceneExplorerPlugin.ConfigFile.Save();
 				SceneExplorerPlugin.ResetBrowserStyles();
+				_stylesReady = false;
 			}
 
-			GUILayout.Space(8);
-			GUILayout.Label("パスはスラッシュ(/)区切りで入力してください（例: //nas/Data/test）。バックスラッシュ形式に自動変換されます");
-			GUILayout.Label("「シーンを開く」ダイアログ表示中はツリーが自動表示されます（ローカルとネットワークを一つのツリーでブラウズ）。選んだフォルダのシーンのみ一覧に出ます");
-			GUILayout.Label("「シーンを開く」ダイアログは開くたびに自動再スキャンされます");
-			GUILayout.Label("ネットワークドライブがゲームから見えない場合（管理者権限起動など）は、ドライブレター(B:\\〜)ではなく UNC パス(\\\\nas\\〜)を指定してください");
-			GUILayout.Label("統合ツリーがシーン一覧ダイアログに表示されます（ローカルとネットワークを同じ階層でブラウズ）。BrowserFolders導入時はBFのツリーの代わりに統合ツリーが表示されます");
-		}
-
-		// ヘルプ行のスタイル（既存 GUILayout.Label と同様の見た目。細字化したい場合はここで調整）
-		// v3.2.0: 毎フレームの new を避けキャッシュ（フォントサイズ設定変更には fontSize のみ追従）
-		private static GUIStyle _helpStyle;
-		private static GUIStyle HelpStyle()
-		{
-			if (_helpStyle == null)
-			{
-				_helpStyle = new GUIStyle(GUI.skin.label);
-			}
-			_helpStyle.fontSize = GUI.skin.label.fontSize - 1;
-			return _helpStyle;
+			GUILayout.EndArea();
 		}
 
 		/// <summary>フォルダ一覧セクションの共通描画（一覧 + 削除 + 追加入力 + 追加ボタン）</summary>
@@ -124,7 +302,7 @@ namespace KK_SceneExplorer
 			{
 				GUILayout.BeginHorizontal();
 				GUILayout.Label(FormatStatus(folderList[i], statuses, i));
-				if (GUILayout.Button("削除", GUILayout.Width(60)))
+				if (GUILayout.Button("削除", _buttonStyle, GUILayout.Width(60)))
 				{
 					folderList.RemoveAt(i);
 					save(folderList);
@@ -135,7 +313,7 @@ namespace KK_SceneExplorer
 			}
 			GUILayout.BeginHorizontal();
 			newPath = GUILayout.TextField(newPath).Replace('\\', '/');
-			if (GUILayout.Button("追加", GUILayout.Width(60)))
+			if (GUILayout.Button("追加", _buttonStyle, GUILayout.Width(60)))
 			{
 				string trimmed = newPath.Trim();
 				if (trimmed.Length > 0)
@@ -195,20 +373,19 @@ namespace KK_SceneExplorer
 
 		private static void SaveSceneFolders(List<string> folders)
 		{
-			// v3.3.0: バックスラッシュをエスケープして保存（BepInEx のエスケープ解釈対策）
-			SceneExplorerPlugin.SceneFolders.Value = SceneExplorerPlugin.EscapeConfigPath(string.Join(";", folders.ToArray()));
+			SceneExplorerPlugin.SceneFolders.Value = string.Join(";", folders.ToArray());
 			SceneExplorerPlugin.ConfigFile.Save();
 		}
 
 		private static void SaveCharaFolders(List<string> folders)
 		{
-			SceneExplorerPlugin.CharaFolders.Value = SceneExplorerPlugin.EscapeConfigPath(string.Join(";", folders.ToArray()));
+			SceneExplorerPlugin.CharaFolders.Value = string.Join(";", folders.ToArray());
 			SceneExplorerPlugin.ConfigFile.Save();
 		}
 
 		private static void SaveCoordinateFolders(List<string> folders)
 		{
-			SceneExplorerPlugin.CoordinateFolders.Value = SceneExplorerPlugin.EscapeConfigPath(string.Join(";", folders.ToArray()));
+			SceneExplorerPlugin.CoordinateFolders.Value = string.Join(";", folders.ToArray());
 			SceneExplorerPlugin.ConfigFile.Save();
 		}
 	}
