@@ -71,7 +71,8 @@ namespace KK_SceneExplorer
 		internal static BrowserMode CurrentBrowserMode = BrowserMode.Scene;
 
 		/// <summary>v3.2.0: モード対応のルートフォルダ一覧（複数登録対応）。存在するフォルダのみ返す。
-		/// CharaFolders 設定の配下 female/male を女/男タブで自動参照し、設定が空/無効なら UserData 配下の従来パスをフォールバックする。</summary>
+		/// v3.3.1: ローカル（UserData 配下）を常に先頭に追加し、設定フォルダをその後ろに並べる
+		/// （シーンモードの「ローカル + 設定フォルダ群」と同じ並びに統一）。設定がローカルと重複する場合は除外する。</summary>
 		public static string[] GetModeRootFolders()
 		{
 			switch (CurrentBrowserMode)
@@ -81,15 +82,13 @@ namespace KK_SceneExplorer
 				{
 					string sub = (CurrentBrowserMode == BrowserMode.CharaFemale) ? "female" : "male";
 					List<string> roots = new List<string>();
+					// v3.3.1: ローカル（UserData\chara\sub）を先頭に追加（存在する場合のみ）
+					string local = GetModeLocalRoot();
+					if (local != null && Directory.Exists(local)) roots.Add(local);
 					foreach (string baseDir in SplitFolderSettings(CharaFolders.Value))
 					{
 						string resolved = ResolveFolderSetting(baseDir + "\\" + sub);
-						if (resolved != null) roots.Add(resolved);
-					}
-					if (roots.Count == 0)
-					{
-						string fallback = Path.Combine(Path.Combine(UserData.Path, "chara"), sub);
-						if (Directory.Exists(fallback)) roots.Add(fallback);
+						if (resolved != null && !SamePath(resolved, local)) roots.Add(resolved);
 					}
 					if (roots.Count == 0)
 						Log.LogWarning("[SceneExplorer] キャラフォルダが見つかりません（CharaFolders 設定を確認してください）: " + CharaFolders.Value);
@@ -98,15 +97,13 @@ namespace KK_SceneExplorer
 				case BrowserMode.Coordinate:
 				{
 					List<string> roots = new List<string>();
+					// v3.3.1: ローカル（UserData\coordinate）を先頭に追加（存在する場合のみ）
+					string local = GetModeLocalRoot();
+					if (local != null && Directory.Exists(local)) roots.Add(local);
 					foreach (string baseDir in SplitFolderSettings(CoordinateFolders.Value))
 					{
 						string resolved = ResolveFolderSetting(baseDir);
-						if (resolved != null) roots.Add(resolved);
-					}
-					if (roots.Count == 0)
-					{
-						string fallback = Path.Combine(UserData.Path, "coordinate");
-						if (Directory.Exists(fallback)) roots.Add(fallback);
+						if (resolved != null && !SamePath(resolved, local)) roots.Add(resolved);
 					}
 					if (roots.Count == 0)
 						Log.LogWarning("[SceneExplorer] 衣装フォルダが見つかりません（CoordinateFolders 設定を確認してください）: " + CoordinateFolders.Value);
@@ -114,6 +111,32 @@ namespace KK_SceneExplorer
 				}
 				default: return new string[0];
 			}
+		}
+
+		/// <summary>v3.3.1: 現在のモードのローカルルート（UserData 配下）を返す。
+		/// Directory.Exists チェックはしない（純粋にパスを返すのみ）。Scene モードは null。</summary>
+		public static string GetModeLocalRoot()
+		{
+			switch (CurrentBrowserMode)
+			{
+				case BrowserMode.CharaFemale: return Path.Combine(Path.Combine(UserData.Path, "chara"), "female");
+				case BrowserMode.CharaMale: return Path.Combine(Path.Combine(UserData.Path, "chara"), "male");
+				case BrowserMode.Coordinate: return Path.Combine(UserData.Path, "coordinate");
+				default: return null;
+			}
+		}
+
+		/// <summary>v3.3.1: 2つのパスが同一フォルダかを判定する（大文字小文字を無視、末尾セパレータは無視）</summary>
+		private static bool SamePath(string a, string b)
+		{
+			if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return false;
+			try
+			{
+				string na = Path.GetFullPath(a).TrimEnd('\\', '/');
+				string nb = Path.GetFullPath(b).TrimEnd('\\', '/');
+				return string.Equals(na, nb, StringComparison.OrdinalIgnoreCase);
+			}
+			catch { return false; }
 		}
 
 		/// <summary>v3.2.0: フォルダ設定文字列（セミコロン区切り）を要素に分解する</summary>

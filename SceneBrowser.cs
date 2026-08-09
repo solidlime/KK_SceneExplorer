@@ -1065,6 +1065,14 @@ namespace KK_SceneExplorer
                         roots.Add(root);
                     }
                 }
+                // v3.3.1: 先頭ルートがローカル（UserData 配下）なら「ローカル」ラベルを付与
+                // （シーンモードと同じ「ローカル + 設定フォルダ群」の並びに統一したため）
+                string modeLocal = SceneExplorerPlugin.GetModeLocalRoot();
+                if (roots.Count > 0 && modeLocal != null &&
+                    string.Equals(roots[0], modeLocal, StringComparison.OrdinalIgnoreCase))
+                {
+                    localAdded = true;
+                }
             }
             else
             {
