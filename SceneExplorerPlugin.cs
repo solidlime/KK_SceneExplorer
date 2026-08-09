@@ -45,6 +45,8 @@ namespace KK_SceneExplorer
 		public static ConfigEntry<string> CharaFolders;
 		public static ConfigEntry<string> CoordinateFolders;
 		public static ConfigEntry<bool> EnableCoordinateBrowser;
+		// v3.4.1: キャラブラウザは一旦停止（メインゲームフック不具合のため。false でシーンブラウザのみ有効）
+		public static ConfigEntry<bool> EnableCharaBrowser;
 		public static ConfigEntry<KeyboardShortcut> SettingsKey;
 		internal static ConfigEntry<int> FontSize;
 		internal static ConfigEntry<int> BrowserWidth;
@@ -191,6 +193,322 @@ namespace KK_SceneExplorer
 			CurrentBrowserFolder = null;
 		}
 
+		// ═══════════════════════════════════════════════════════════════
+		// v3.4.0: メインゲーム（Koikatu）キャラロード対応
+		// ═══════════════════════════════════════════════════════════════
+
+		/// <summary>v3.4.0: メインゲーム（Koikatu / KoikatsuSunshine キャラエディタ）かどうか。
+		/// Application.productName が "CharaStudio" 以外 = メインゲーム。</summary>
+		public static bool IsMainGame
+		{
+			get
+			{
+				try { return !string.Equals(Application.productName, "CharaStudio", StringComparison.Ordinal); }
+				catch { return false; }
+			}
+		}
+
+		// キャラロードダイアログ（ChaCustom.CustomFileWindow）のリフレクションキャッシュ（v3.4.0）
+		private static ChaCustom.CustomFileWindow _mainGameFileWindow;
+		private static PropertyInfo _mainGameFwTypeProperty;
+		private static Type _mainGameFwTypeEnumType;
+		private static int _mainGameFwTypeCharaLoad = -1;
+		private static int _mainGameFwTypeCharaSave = -1;
+		private static FieldInfo _mainGameObjCharaLoadField;
+		private static FieldInfo _mainGameBtnCloseField;
+		private static FieldInfo _mainGameObjSaveField;
+		private static bool _mainGameCharaLoadActive;
+		private static bool _mainGameCharaSaveActive;
+
+		/// <summary>v3.4.0: メインゲームでキャラ保存ダイアログ（CharaSave）を差し替え中かどうか。
+		/// SceneBrowser のボトムバーを保存 UI（新規保存/上書き）に切り替える判定に使う。</summary>
+		public static bool IsMainGameCharaSaveMode { get { return _mainGameCharaSaveActive; } }
+
+		/// <summary>v3.4.0: メインゲーム用キャラモード起動。modeSex は KK 慣例（0=女 / 1=男）。
+		/// スタジオ用 RequestCharaMode と同じ状態セットで、SceneBrowser 側のモード遷移検出で表示される。</summary>
+		private static void RequestCharaModeMainGame(int modeSex)
+		{
+			CurrentBrowserMode = (modeSex == 0) ? BrowserMode.CharaFemale : BrowserMode.CharaMale;
+			string[] roots = GetModeRootFolders();
+			CurrentBrowserFolder = (roots.Length > 0) ? roots[0] : null;
+			Log.LogInfo("[SceneExplorer] メインゲーム Charaモード: " + CurrentBrowserMode + " folder=" + CurrentBrowserFolder);
+		}
+
+		/// <summary>v3.4.0: メインゲームのキャラロードダイアログを閉じる（SceneBrowser の閉じるボタンから呼ばれる）。
+		/// 1) 標準の閉じるボタン（btnClose.onClick.Invoke、ウィンドウ全体を非表示）→ 2) 発火できなかった場合は
+		/// ウィンドウ全体を直接非表示 → 3) 標準パネル復元。
+		/// fwType は書き換えない（書換えると保存モード側（CharaSave）の入遷移検知と相互に発火し、
+		/// ロード⇔保存の無限ループになるため）。ウィンドウの非表示はポーリング側
+		/// （DetectMainGameCharaLoad）の終了検知で検出され、ブラウザの終了処理が行われる。</summary>
+		public static void CloseMainGameCharaLoad()
+		{
+			if (!IsMainGame) return;
+			try
+			{
+				ChaCustom.CustomFileWindow window = ResolveMainGameFileWindow();
+				if (window != null)
+				{
+					// 1) ゲーム標準の閉じる処理（btnClose.onClick → ウィンドウ全体を非表示）をそのまま実行
+					InvokeMainGameCloseButton(window);
+					// 2) btnClose が非アクティブ等で発火できなかった場合はウィンドウ全体を直接非表示
+					if (window.gameObject != null && window.gameObject.activeSelf)
+					{
+						window.gameObject.SetActive(false);
+					}
+				}
+				// 3) 標準パネル復元（最終状態を確実に成立させる）
+				SetMainGameCharaPanelActive(true);
+			}
+			catch (Exception ex)
+			{
+				Log.LogWarning("[SceneExplorer] メインゲームキャラロードダイアログのクローズに失敗: " + ex.Message);
+				try { SetMainGameCharaPanelActive(true); } catch { }
+			}
+		}
+
+		/// <summary>v3.4.0: メインゲームのキャラロードダイアログ監視（Update から毎フレーム呼ばれる）。
+		/// fwType が CharaLoad かつウィンドウ表示中に標準パネルを非表示にして SceneBrowser を表示し、
+		/// ウィンドウが閉じられた（またはタブが切り替わった）瞬間に標準パネルを復元してブラウザを閉じる。
+		/// 終了検知は fwType の変更ではなくウィンドウの activeSelf を基準にする（ゲームの閉じるボタンは
+		/// fwType を変えずにウィンドウ全体を非表示にするため）。fwType への書き込みは一切行わない
+		/// （書込むと保存モード側（DetectMainGameCharaSave）の入遷移と相互発火するため）。</summary>
+		private static void DetectMainGameCharaLoad()
+		{
+			// v3.4.1: キャラブラウザ停止中（EnableCharaBrowser=false）は監視しない（標準 UI のまま）
+			if (!EnableCharaBrowser.Value) return;
+			try
+			{
+				ChaCustom.CustomFileWindow window = ResolveMainGameFileWindow();
+				if (window == null) return;
+
+				int fwType = ReadMainGameFwType(window);
+				// 列挙値が解決できている場合のみ判定（-1 == -1 の誤発火防止）
+				bool charaLoad = (_mainGameFwTypeCharaLoad >= 0) && (fwType == _mainGameFwTypeCharaLoad);
+				bool windowVisible = (window.gameObject != null) && window.gameObject.activeSelf;
+
+				if (_mainGameCharaLoadActive)
+				{
+					if (charaLoad && windowVisible)
+					{
+						// 表示中は毎フレーム非表示を維持（ゲーム側の再表示と競合しないよう）
+						SetMainGameCharaPanelActive(false);
+					}
+					else
+					{
+						// キャラロード終了（ウィンドウが閉じられた or タブが切り替わった）: ブラウザを閉じる
+						_mainGameCharaLoadActive = false;
+						// ウィンドウ非表示での終了なら標準パネルを復元。タブ切替での終了は
+						// ゲーム側の UpdateWindow がパネル状態を管理するため復元しない
+						if (charaLoad) SetMainGameCharaPanelActive(true);
+						if (CurrentBrowserMode != BrowserMode.Scene)
+							RequestSceneMode("MainGameCharaLoadClose");
+						Log.LogInfo("[SceneExplorer] メインゲームキャラロード終了: 標準UI復元");
+					}
+				}
+				else if (charaLoad && windowVisible)
+				{
+					// キャラロード開始: 標準パネルを隠してブラウザを表示
+					_mainGameCharaLoadActive = true;
+					SetMainGameCharaPanelActive(false);
+					int modeSex = 0;
+					ChaCustom.CustomBase customBase = FindObjectOfType<ChaCustom.CustomBase>();
+					if (customBase != null) modeSex = customBase.modeSex;
+					RequestCharaModeMainGame(modeSex);
+					Log.LogInfo("[SceneExplorer] メインゲームキャラロード開始: sex=" + modeSex);
+				}
+			}
+			catch (Exception ex)
+			{
+				Log.LogWarning("[SceneExplorer] メインゲームキャラロード監視エラー: " + ex.Message);
+			}
+		}
+
+		// ── リフレクションヘルパー（v3.4.0） ──
+
+		/// <summary>CustomFileWindow を解決。Unity 破棄（シーン切替）時は自動で再取得する。</summary>
+		private static ChaCustom.CustomFileWindow ResolveMainGameFileWindow()
+		{
+			if (_mainGameFileWindow == null)
+			{
+				_mainGameFileWindow = FindObjectOfType<ChaCustom.CustomFileWindow>();
+				if (_mainGameFileWindow != null) EnsureMainGameFwTypeCache();
+			}
+			return _mainGameFileWindow;
+		}
+
+		/// <summary>fwType プロパティ・FileWindowType 列挙値・objCharaLoad/btnClose フィールドを初回に解決する。</summary>
+		private static void EnsureMainGameFwTypeCache()
+		{
+			Type t = typeof(ChaCustom.CustomFileWindow);
+			if (_mainGameFwTypeProperty == null)
+			{
+				_mainGameFwTypeProperty = t.GetProperty("fwType");
+				if (_mainGameFwTypeProperty != null)
+				{
+					_mainGameFwTypeEnumType = _mainGameFwTypeProperty.PropertyType;
+					try
+					{
+						_mainGameFwTypeCharaLoad = Convert.ToInt32(Enum.Parse(_mainGameFwTypeEnumType, "CharaLoad"));
+						_mainGameFwTypeCharaSave = Convert.ToInt32(Enum.Parse(_mainGameFwTypeEnumType, "CharaSave"));
+					}
+					catch { }
+					// Enum 名解決に失敗した場合のフォールバック（KK の FileWindowType: CharaLoad=1 / CharaSave=0）
+					if (_mainGameFwTypeCharaLoad < 0) _mainGameFwTypeCharaLoad = 1;
+					if (_mainGameFwTypeCharaSave < 0) _mainGameFwTypeCharaSave = 0;
+				}
+			}
+			if (_mainGameObjCharaLoadField == null)
+				_mainGameObjCharaLoadField = t.GetField("objCharaLoad", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+			if (_mainGameObjSaveField == null)
+				_mainGameObjSaveField = t.GetField("objSave", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+			if (_mainGameBtnCloseField == null)
+				_mainGameBtnCloseField = t.GetField("btnClose", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+		}
+
+		/// <summary>fwType を読む（FileWindowType の int 値。解決失敗時は -1）。</summary>
+		private static int ReadMainGameFwType(ChaCustom.CustomFileWindow window)
+		{
+			try
+			{
+				EnsureMainGameFwTypeCache();
+				if (_mainGameFwTypeProperty == null) return -1;
+				return Convert.ToInt32(_mainGameFwTypeProperty.GetValue(window, null));
+			}
+			catch { return -1; }
+		}
+
+		/// <summary>標準のキャラロードパネル（objCharaLoad）を表示/非表示。変化時のみ SetActive。</summary>
+		private static void SetMainGameCharaPanelActive(bool active)
+		{
+			try
+			{
+				ChaCustom.CustomFileWindow window = ResolveMainGameFileWindow();
+				if (window == null) return;
+				EnsureMainGameFwTypeCache();
+				if (_mainGameObjCharaLoadField == null) return;
+				GameObject panel = _mainGameObjCharaLoadField.GetValue(window) as GameObject;
+				if (panel != null && panel.activeSelf != active) panel.SetActive(active);
+			}
+			catch { }
+		}
+
+		/// <summary>標準の閉じるボタン（btnClose）の onClick を直接発火する（ゲーム標準の閉じる処理）。</summary>
+		private static void InvokeMainGameCloseButton(ChaCustom.CustomFileWindow window)
+		{
+			try
+			{
+				EnsureMainGameFwTypeCache();
+				if (_mainGameBtnCloseField == null) return;
+				object btnClose = _mainGameBtnCloseField.GetValue(window);
+				if (btnClose == null) return;
+				FieldInfo onClickField = btnClose.GetType().GetField("onClick", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+				UnityEngine.Events.UnityEvent evt = (onClickField != null) ? (onClickField.GetValue(btnClose) as UnityEngine.Events.UnityEvent) : null;
+				if (evt != null) evt.Invoke();
+			}
+			catch (Exception ex)
+			{
+				Log.LogWarning("[SceneExplorer] btnClose.onClick の発火に失敗: " + ex.Message);
+			}
+		}
+
+		/// <summary>v3.4.0: メインゲームのキャラ保存ダイアログを閉じる（SceneBrowser の閉じるボタンから呼ばれる）。
+		/// ロード側（CloseMainGameCharaLoad）と同一方式: btnClose.onClick.Invoke → 失敗時はウィンドウ全体を
+		/// 直接非表示 → 標準パネル復元。fwType は書き換えない。</summary>
+		public static void CloseMainGameCharaSave()
+		{
+			if (!IsMainGame) return;
+			try
+			{
+				ChaCustom.CustomFileWindow window = ResolveMainGameFileWindow();
+				if (window != null)
+				{
+					InvokeMainGameCloseButton(window);
+					if (window.gameObject != null && window.gameObject.activeSelf)
+					{
+						window.gameObject.SetActive(false);
+					}
+				}
+				SetMainGameSavePanelActive(true);
+			}
+			catch (Exception ex)
+			{
+				Log.LogWarning("[SceneExplorer] メインゲームキャラ保存ダイアログのクローズに失敗: " + ex.Message);
+				try { SetMainGameSavePanelActive(true); } catch { }
+			}
+		}
+
+		/// <summary>v3.4.0: メインゲームのキャラ保存ダイアログ監視（Update から毎フレーム呼ばれる）。
+		/// DetectMainGameCharaLoad と同型: fwType が CharaSave かつウィンドウ表示中に objSave を隠して
+		/// SceneBrowser（保存 UI）を表示し、ウィンドウが閉じられた（またはタブが切り替わった）瞬間に
+		/// 標準パネルを復元してブラウザを閉じる。ロード側と enum 上排他（CharaLoad/CharaSave は同時にならない）
+		/// ため状態は独立して管理する。</summary>
+		private static void DetectMainGameCharaSave()
+		{
+			// v3.4.1: キャラブラウザ停止中（EnableCharaBrowser=false）は監視しない（標準 UI のまま）
+			if (!EnableCharaBrowser.Value) return;
+			try
+			{
+				ChaCustom.CustomFileWindow window = ResolveMainGameFileWindow();
+				if (window == null) return;
+
+				int fwType = ReadMainGameFwType(window);
+				// 列挙値が解決できている場合のみ判定（-1 == -1 の誤発火防止）
+				bool charaSave = (_mainGameFwTypeCharaSave >= 0) && (fwType == _mainGameFwTypeCharaSave);
+				bool windowVisible = (window.gameObject != null) && window.gameObject.activeSelf;
+
+				if (_mainGameCharaSaveActive)
+				{
+					if (charaSave && windowVisible)
+					{
+						// 表示中は毎フレーム非表示を維持（ゲーム側の再表示と競合しないよう）
+						SetMainGameSavePanelActive(false);
+					}
+					else
+					{
+						// キャラ保存終了（ウィンドウが閉じられた or タブが切り替わった）: ブラウザを閉じる
+						_mainGameCharaSaveActive = false;
+						// ウィンドウ非表示での終了なら標準パネルを復元。タブ切替での終了は
+						// ゲーム側の UpdateWindow がパネル状態を管理するため復元しない
+						if (charaSave) SetMainGameSavePanelActive(true);
+						if (CurrentBrowserMode != BrowserMode.Scene)
+							RequestSceneMode("MainGameCharaSaveClose");
+						Log.LogInfo("[SceneExplorer] メインゲームキャラ保存終了: 標準UI復元");
+					}
+				}
+				else if (charaSave && windowVisible)
+				{
+					// キャラ保存開始: 標準パネルを隠してブラウザ（保存 UI）を表示
+					_mainGameCharaSaveActive = true;
+					SetMainGameSavePanelActive(false);
+					int modeSex = 0;
+					ChaCustom.CustomBase customBase = FindObjectOfType<ChaCustom.CustomBase>();
+					if (customBase != null) modeSex = customBase.modeSex;
+					RequestCharaModeMainGame(modeSex);
+					Log.LogInfo("[SceneExplorer] メインゲームキャラ保存開始: sex=" + modeSex);
+				}
+			}
+			catch (Exception ex)
+			{
+				Log.LogWarning("[SceneExplorer] メインゲームキャラ保存監視エラー: " + ex.Message);
+			}
+		}
+
+		/// <summary>v3.4.0: 標準のキャラ保存パネル（objSave）を表示/非表示。変化時のみ SetActive。</summary>
+		private static void SetMainGameSavePanelActive(bool active)
+		{
+			try
+			{
+				ChaCustom.CustomFileWindow window = ResolveMainGameFileWindow();
+				if (window == null) return;
+				EnsureMainGameFwTypeCache();
+				if (_mainGameObjSaveField == null) return;
+				GameObject panel = _mainGameObjSaveField.GetValue(window) as GameObject;
+				if (panel != null && panel.activeSelf != active) panel.SetActive(active);
+			}
+			catch { }
+		}
+
+
 		/// <summary>最後に押された追加タブ（0=女 / 1=男 / それ以外=未選択）。AddButtonCtrl.OnClick Postfix から記録。</summary>
 
 		/// <summary>v2.1.1: 終了確認（StudioExit）・確認ダイアログ（StudioCheck）シーン表示中フラグ。</summary>
@@ -246,6 +564,7 @@ namespace KK_SceneExplorer
 				new ConfigDescription("サムネイルサイズ（48〜600）", new AcceptableValueRange<int>(48, 600)));
 			TreeSplitPos = Config.Bind("UI", "TreeSplitPos", 240f, "ツリー/グリッド分割位置");
 			EnableCoordinateBrowser = Config.Bind("General", "EnableCoordinateBrowser", false, "衣装ブラウザを使用する（v3.2.0 で一時停止中）");
+			EnableCharaBrowser = Config.Bind("General", "EnableCharaBrowser", false, "キャラブラウザを使用する（v3.4.0 で一時停止中）");
 			CharaFolders = Config.Bind("General", "CharaFolders", "", "キャラフォルダ（セミコロン区切り）。配下の female/male を女/男タブで自動参照");
 			CoordinateFolders = Config.Bind("General", "CoordinateFolders", "", "衣装フォルダ（セミコロン区切り）");
 			SortMode = Config.Bind("General", "SortMode", 1, "ファイルソート基準（0=名前, 1=日時, 2=サイズ）");
@@ -328,7 +647,18 @@ namespace KK_SceneExplorer
 
 		private void Update()
 		{
-			ForceHideSceneLoadUi();
+			if (IsMainGame)
+			{
+				// v3.4.0: メインゲーム（キャラエディタ）ではスタジオのシーン一覧UIが存在しないため、
+				// キャラロード/保存ダイアログの監視に置き換える（無駄な FindObjectOfType 検索も排除）。
+				// ロードと保存は enum 上排他なので両方監視してよい（状態は個別管理）
+				DetectMainGameCharaLoad();
+				DetectMainGameCharaSave();
+			}
+			else
+			{
+				ForceHideSceneLoadUi();
+			}
 
 			if (bfSearchDone)
 			{
@@ -1018,6 +1348,8 @@ namespace KK_SceneExplorer
 			// v3.1.0: タブ切替後、CharaList が表示状態になったらキャラモード開始（排他制御なので他タブなら自動で非表示になる）
 			private static void AddButtonOnClickPostfix()
 			{
+				// v3.4.1: キャラブラウザ停止中（EnableCharaBrowser=false）は標準 UI のまま
+				if (!SceneExplorerPlugin.EnableCharaBrowser.Value) return;
 				Studio.CharaList activeList = null;
 				foreach (var list in SceneExplorerPlugin.activeCharaLists)
 				{

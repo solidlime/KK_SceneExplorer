@@ -112,6 +112,9 @@ namespace KK_SceneExplorer
         private int _selectedIndex = -1;
         private string _lastScannedFolder;
 
+        // v3.4.0: メインゲーム保存モードの新規保存ファイル名（ボトムバーの TextField）
+        private string _mainGameSaveFileName = "";
+
         // UI状態
         private Vector2 _treeScroll;
         private Vector2 _gridScroll;
@@ -924,32 +927,54 @@ namespace KK_SceneExplorer
             // v3.2.1: キャラモードは [Add][Replace] の明示分離（Add = 常に追加 / Replace = 常に置き換え）
             if (charaMode)
             {
-                int sex = (SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.CharaFemale) ? 1 : 0;
+                // v3.4.0: メインゲームのキャラ保存モード（CharaSave）では標準の保存 UI を隠しているため、
+                // [Add/Replace/Keep Clothes] をファイル名入力 + [Save New] + [Overwrite] に差し替える
+                if (SceneExplorerPlugin.IsMainGameCharaSaveMode)
+                {
+                    _mainGameSaveFileName = GUILayout.TextField(_mainGameSaveFileName, GUILayout.MinWidth(FooterButtonWidth * 2f));
 
-                GUI.enabled = _selectedIndex >= 0;
-                if (GUILayout.Button("Add", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
-                {
-                    if (_selectedIndex >= 0 && _selectedIndex < _items.Count)
-                        AddSelected(_items[_selectedIndex].FilePath, sex);
+                    GUI.enabled = _mainGameSaveFileName.Trim().Length > 0;
+                    if (GUILayout.Button("Save New", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
+                    {
+                        SaveCharaInMainGame(BuildMainGameSavePath(_mainGameSaveFileName), false);
+                    }
+                    GUI.enabled = _selectedIndex >= 0;
+                    if (GUILayout.Button("Overwrite", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
+                    {
+                        if (_selectedIndex >= 0 && _selectedIndex < _items.Count)
+                            SaveCharaInMainGame(_items[_selectedIndex].FilePath, true);
+                    }
+                    GUI.enabled = true;
                 }
-                GUI.enabled = true;
+                else
+                {
+                    int sex = (SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.CharaFemale) ? 1 : 0;
 
-                // Replace は選択オブジェクトが無いとき無効化（OCIChar 判定はクリック時。Count のみ毎フレーム判定）
-                var gom = Singleton<Studio.GuideObjectManager>.Instance;
-                bool hasSelection = gom != null && gom.selectObjectKey != null && gom.selectObjectKey.Count() > 0;
-                GUI.enabled = _selectedIndex >= 0 && hasSelection;
-                if (GUILayout.Button("Replace", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
-                {
-                    if (_selectedIndex >= 0 && _selectedIndex < _items.Count)
-                        ReplaceSelected(_items[_selectedIndex].FilePath, sex);
+                    GUI.enabled = _selectedIndex >= 0;
+                    if (GUILayout.Button("Add", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
+                    {
+                        if (_selectedIndex >= 0 && _selectedIndex < _items.Count)
+                            AddSelected(_items[_selectedIndex].FilePath, sex);
+                    }
+                    GUI.enabled = true;
+
+                    // Replace は選択オブジェクトが無いとき無効化（OCIChar 判定はクリック時。Count のみ毎フレーム判定）
+                    var gom = Singleton<Studio.GuideObjectManager>.Instance;
+                    bool hasSelection = gom != null && gom.selectObjectKey != null && gom.selectObjectKey.Count() > 0;
+                    GUI.enabled = _selectedIndex >= 0 && hasSelection;
+                    if (GUILayout.Button("Replace", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
+                    {
+                        if (_selectedIndex >= 0 && _selectedIndex < _items.Count)
+                            ReplaceSelected(_items[_selectedIndex].FilePath, sex);
+                    }
+                    // v3.2.3: 服を変えずに顔・体型・髪だけ差し替える（標準 ChangeChara は服も変わるため）
+                    if (GUILayout.Button("Keep Clothes", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
+                    {
+                        if (_selectedIndex >= 0 && _selectedIndex < _items.Count)
+                            KeepClothesSelected(_items[_selectedIndex].FilePath, sex);
+                    }
+                    GUI.enabled = true;
                 }
-                // v3.2.3: 服を変えずに顔・体型・髪だけ差し替える（標準 ChangeChara は服も変わるため）
-                if (GUILayout.Button("Keep Clothes", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
-                {
-                    if (_selectedIndex >= 0 && _selectedIndex < _items.Count)
-                        KeepClothesSelected(_items[_selectedIndex].FilePath, sex);
-                }
-                GUI.enabled = true;
             }
             else
             {
@@ -1505,6 +1530,19 @@ namespace KK_SceneExplorer
         // GuideObjectManager が未初期化等の場合は従来の追加にフォールバックする。
         private void AddOrReplaceChara(string path, int sex)
         {
+            // v3.4.0: メインゲーム（Koikatu）ではスタジオ API（OCIChar / Studio.Instance）が使えないため、
+            // キャラエディタの標準ロード経路（LoadFileLimited + Reload）で直接読み込む
+            if (SceneExplorerPlugin.IsMainGame)
+            {
+                // v3.4.0: メインゲームのキャラ保存モードではダブルクリック = 選択カードへ上書き保存
+                if (SceneExplorerPlugin.IsMainGameCharaSaveMode)
+                {
+                    SaveCharaInMainGame(path, true);
+                    return;
+                }
+                LoadCharaInMainGame(path, sex);
+                return;
+            }
             Studio.OCIChar[] targets = CollectSameSexChara(sex);
 
             if (targets != null && targets.Length > 0)
@@ -1526,6 +1564,94 @@ namespace KK_SceneExplorer
                 try { Studio.Studio.Instance.AddMale(path); }
                 catch (Exception ex) { SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] キャラ追加失敗: " + path + " - " + ex.Message); }
             }
+        }
+
+        // v3.4.0: メインゲームのキャラロード（キャラエディタの標準経路を直接実行）
+        // sex はスタジオ慣例（1=女 / 0=男）で受け取り、LoadFileLimited の Byte sex（0=女 / 1=男）へ変換する
+        private void LoadCharaInMainGame(string path, int sex)
+        {
+            try
+            {
+                ChaCustom.CustomBase customBase = FindObjectOfType<ChaCustom.CustomBase>();
+                if (customBase == null)
+                {
+                    SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] メインゲームキャラロード失敗: CustomBase が見つかりません: " + path);
+                    return;
+                }
+                ChaControl chaCtrl = customBase.chaCtrl;
+                if (chaCtrl == null)
+                {
+                    SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] メインゲームキャラロード失敗: chaCtrl が null です: " + path);
+                    return;
+                }
+                // 顔・体型・髪・パラメータ・衣装をすべてカードから読み込む
+                bool ok = chaCtrl.chaFile.LoadFileLimited(path, (byte)(1 - sex), true, true, true, true, true);
+                if (!ok)
+                {
+                    SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] メインゲームキャラロード失敗（LoadFileLimited が false）: " + path);
+                    return;
+                }
+                chaCtrl.Reload(false, false, false, false);
+                SceneExplorerPlugin.Log.LogInfo("[SceneBrowser] メインゲームキャラロード: " + path);
+            }
+            catch (Exception ex)
+            {
+                SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] メインゲームキャラロード失敗: " + path + " - " + ex.Message);
+            }
+        }
+
+        // v3.4.0: メインゲームのキャラ保存（キャラエディタの標準経路を直接実行）
+        // overwrite=true なら選択カードへ上書き、false なら指定パスに新規保存。
+        // ゲーム本体と同一の引数（sex=(byte)-1 / newFile=false）で SaveCharaFile を呼ぶ
+        // （CustomControl.<Start>m__8 の IL デコードで確認: 新規/上書きとも同一引数）。
+        private void SaveCharaInMainGame(string path, bool overwrite)
+        {
+            if (string.IsNullOrEmpty(path)) return;
+            try
+            {
+                ChaCustom.CustomBase customBase = FindObjectOfType<ChaCustom.CustomBase>();
+                if (customBase == null)
+                {
+                    SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] メインゲームキャラ保存失敗: CustomBase が見つかりません: " + path);
+                    return;
+                }
+                ChaControl chaCtrl = customBase.chaCtrl;
+                if (chaCtrl == null)
+                {
+                    SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] メインゲームキャラ保存失敗: chaCtrl が null です: " + path);
+                    return;
+                }
+                bool ok = chaCtrl.chaFile.SaveCharaFile(path, unchecked((byte)-1), false);
+                if (!ok)
+                {
+                    SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] メインゲームキャラ保存失敗（SaveCharaFile が false）: " + path);
+                    return;
+                }
+                SceneExplorerPlugin.Log.LogInfo("[SceneBrowser] メインゲームキャラ保存: " + path + (overwrite ? " (overwrite)" : ""));
+                // 保存したカードを一覧に反映
+                RescanFiles();
+            }
+            catch (Exception ex)
+            {
+                SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] メインゲームキャラ保存失敗: " + path + " - " + ex.Message);
+            }
+        }
+
+        // v3.4.0: 新規保存用のフルパスを組み立てる（現在のブラウザフォルダ + ファイル名、.png 拡張子を補完）
+        private string BuildMainGameSavePath(string fileName)
+        {
+            fileName = fileName.Trim();
+            if (fileName.Length == 0) return null;
+            if (!fileName.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
+                fileName += ".png";
+            string folder = SceneExplorerPlugin.CurrentBrowserFolder;
+            if (string.IsNullOrEmpty(folder))
+            {
+                string[] roots = SceneExplorerPlugin.GetModeRootFolders();
+                folder = (roots.Length > 0) ? roots[0] : "";
+            }
+            if (string.IsNullOrEmpty(folder)) return null;
+            return Path.Combine(folder, fileName);
         }
 
         // v3.2.1: 選択中の同性別 OCIChar を収集する（標準 CharaList と同一方式。失敗時は null）
@@ -1687,6 +1813,19 @@ namespace KK_SceneExplorer
             // v3.1.0: キャラ/衣装モード中はダイアログシーンが無いため UnLoad せず、モード解除と標準パネルの復元のみ行う
             if (SceneExplorerPlugin.CurrentBrowserMode != SceneExplorerPlugin.BrowserMode.Scene)
             {
+                // v3.4.0: メインゲームでは標準の閉じる処理（btnClose.onClick.Invoke → ウィンドウ全体非表示）を実行する。
+                // ポーリング側（DetectMainGameCharaLoad / DetectMainGameCharaSave）の終了検知で標準パネル復元・モード解除が完了する
+                if (SceneExplorerPlugin.IsMainGame)
+                {
+                    if (SceneExplorerPlugin.IsMainGameCharaSaveMode)
+                    {
+                        SceneExplorerPlugin.CloseMainGameCharaSave();
+                    }
+                    else
+                    {
+                        SceneExplorerPlugin.CloseMainGameCharaLoad();
+                    }
+                }
                 SceneExplorerPlugin.RequestSceneMode("Close");
                 _visible = false;
                 _selectedIndex = -1;
