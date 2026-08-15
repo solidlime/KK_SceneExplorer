@@ -1410,38 +1410,95 @@ namespace KK_SceneExplorer
 				catch (Exception ex) { Log.LogWarning("[SceneExplorer] コスチュームUI非表示失敗: " + ex.Message); }
 			}
 
+			// KK_CardCompression の圧縮完了待ちポーリング（500ms × 3600 = 30分）
+			private const int TransferWaitAttempts = 3600;
+			private const int TransferWaitIntervalMs = 500;
+			// 変化検知後の安定確認（1秒間隔・最大30秒）
+			private const int TransferStabilizeChecks = 2;
+			private const int TransferStabilizeIntervalMs = 1000;
+			private const int TransferStabilizeMaxAttempts = 30;
+			// 転送リトライ（2秒間隔 × 5回）
+			private const int TransferRetryAttempts = 5;
+			private const int TransferRetryIntervalMs = 2000;
+
 			private static void DelayedTransfer(string src, string dest)
 			{
 				try
 				{
 					long firstSize = -1;
-					for (int i = 0; i < 120; i++)
+					DateTime firstWriteTime = DateTime.MinValue;
+					for (int i = 0; i < TransferWaitAttempts; i++)
 					{
-						if (!File.Exists(src))
+						FileInfo fi = new FileInfo(src);
+						if (!fi.Exists)
 						{
 							Log.LogWarning("転送対象がありません（保存が中断された可能性）: " + src);
 							return;
 						}
-						long size = new FileInfo(src).Length;
+						long size = fi.Length;
+						DateTime writeTime = fi.LastWriteTime;
 						if (firstSize < 0)
 						{
 							firstSize = size;
+							firstWriteTime = writeTime;
 						}
-						else if (size != firstSize)
+						else if (size != firstSize || writeTime != firstWriteTime)
 						{
-							Thread.Sleep(500);
-							TransferNow(src, dest);
+							// 変化検知（サイズ or LastWriteTime）: KKCC の上書きスワップの瞬間を読まないよう安定確認してから転送
+							if (WaitStable(src))
+							{
+								TransferNow(src, dest);
+							}
 							return;
 						}
-						Thread.Sleep(500);
+						Thread.Sleep(TransferWaitIntervalMs);
 					}
 					Log.LogWarning("KK_CardCompressionの圧縮完了を待てませんでした（未圧縮のまま転送します）: " + src);
 					TransferNow(src, dest);
 				}
 				catch (Exception ex)
 				{
-					Log.LogError("ネットワーク転送（遅延）に失敗しました（ローカルに残します）: " + ex.Message);
+					Log.LogError("ネットワーク転送（遅延）に失敗しました（ローカルに残します）: " + ex.ToString());
 				}
+			}
+
+			/// <summary>変化検知後: サイズと LastWriteTime が2回連続で不変になるまで待つ（1秒間隔・最大30秒）。
+			/// ファイル消失時は false を返す（転送しない）。最大待ち後も安定しなければ true で転送する（タイムアウトのフォールバックと同じ趣旨）。</summary>
+			private static bool WaitStable(string src)
+			{
+				long size = -1;
+				DateTime writeTime = DateTime.MinValue;
+				int stableCount = 0;
+				for (int i = 0; i < TransferStabilizeMaxAttempts; i++)
+				{
+					Thread.Sleep(TransferStabilizeIntervalMs);
+					FileInfo fi = new FileInfo(src);
+					if (!fi.Exists)
+					{
+						Log.LogWarning("転送対象がありません（保存が中断された可能性）: " + src);
+						return false;
+					}
+					if (size < 0)
+					{
+						size = fi.Length;
+						writeTime = fi.LastWriteTime;
+					}
+					else if (fi.Length == size && fi.LastWriteTime == writeTime)
+					{
+						stableCount++;
+						if (stableCount >= TransferStabilizeChecks)
+						{
+							return true;
+						}
+					}
+					else
+					{
+						stableCount = 0;
+						size = fi.Length;
+						writeTime = fi.LastWriteTime;
+					}
+				}
+				return true;
 			}
 
 			private static void TransferNow(string src, string dest)
@@ -1449,13 +1506,32 @@ namespace KK_SceneExplorer
 				try
 				{
 					Directory.CreateDirectory(Path.GetDirectoryName(dest));
-					File.Copy(src, dest, true);
-					File.Delete(src);
-					Log.LogInfo("ネットワークへ転送しました: " + dest);
+					for (int i = 0; i < TransferRetryAttempts; i++)
+					{
+						try
+						{
+							File.Copy(src, dest, true);
+							// コピー直後にサイズ一致を確認（KKCC の書き込み中は IOException かサイズ不一致になる）
+							if (new FileInfo(dest).Length == new FileInfo(src).Length)
+							{
+								File.Delete(src);
+								Log.LogInfo("ネットワークへ転送しました: " + dest);
+								return;
+							}
+						}
+						catch (IOException) { }
+						catch (UnauthorizedAccessException) { }
+						if (i < TransferRetryAttempts - 1)
+						{
+							Log.LogWarning("転送中に競合が発生（KK_CardCompressionの書き込み中？）。リトライします (" + (i + 1) + "/" + TransferRetryAttempts + "): " + dest);
+							Thread.Sleep(TransferRetryIntervalMs);
+						}
+					}
+					Log.LogError("ネットワーク転送に失敗しました（ローカルに残します）: " + src);
 				}
 				catch (Exception ex)
 				{
-					Log.LogError("ネットワーク転送に失敗しました（ローカルに残します）: " + ex.Message);
+					Log.LogError("ネットワーク転送に失敗しました（ローカルに残します）: " + ex.ToString());
 				}
 			}
 
