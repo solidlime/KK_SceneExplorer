@@ -1425,6 +1425,29 @@ namespace KK_SceneExplorer
 			{
 				try
 				{
+					// KK_CardCompression 未ロード、または圧縮設定が無効（Enable=false / Studio Scene=false）なら
+					// 圧縮が走らないため、30分の待機をせず即転送する
+					var kkccType = Type.GetType("KK_CardCompression.Plugin, KK_CardCompression");
+					bool kkccCompressionActive = false;
+					if (kkccType != null)
+					{
+						try
+						{
+							// KKCC の Enable / EnableOnStudioSceneSaving は public static プロパティ（ConfigEntry<bool>）
+							var enable = (ConfigEntry<bool>)kkccType.GetProperty("Enable", BindingFlags.Public | BindingFlags.Static)?.GetValue(null, null);
+							var studioScene = (ConfigEntry<bool>)kkccType.GetProperty("EnableOnStudioSceneSaving", BindingFlags.Public | BindingFlags.Static)?.GetValue(null, null);
+							kkccCompressionActive = enable != null && studioScene != null && enable.Value && studioScene.Value;
+						}
+						catch (Exception ex)
+						{
+							Log.LogWarning("KK_CardCompressionの設定確認に失敗したため即転送します: " + ex.Message);
+						}
+					}
+					if (!kkccCompressionActive)
+					{
+						TransferNow(src, dest);
+						return;
+					}
 					long firstSize = -1;
 					DateTime firstWriteTime = DateTime.MinValue;
 					for (int i = 0; i < TransferWaitAttempts; i++)
