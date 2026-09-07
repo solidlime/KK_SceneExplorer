@@ -2063,6 +2063,8 @@ namespace KK_SceneExplorer
             }
             _items.Clear();
             _items.AddRange(scanned);
+            // v3.4.2: 反映待ち窓口で旧リストをクリック→差し替え後の同 index が別ファイルを指すのを防ぐ
+            _selectedIndex = -1;
             SortItems();
         }
 
