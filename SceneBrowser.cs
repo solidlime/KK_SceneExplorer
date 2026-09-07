@@ -143,6 +143,27 @@ namespace KK_SceneExplorer
         private HashSet<string> _expandedFolders = new HashSet<string>();
         private string _treeFilter = "";
         private Dictionary<string, List<DirEntry>> _dirChildrenCache = new Dictionary<string, List<DirEntry>>();
+        // 子ディレクトリ有無のキャッシュ（HasSubdirectories の OnGUI 毎フレーム IO を排除）。
+        // 無効化は _dirChildrenCache と同じタイミング・同じ寿命で行う
+        private Dictionary<string, bool> _hasChildrenCache = new Dictionary<string, bool>();
+
+        // ── フィルタマッチ集合のバックグラウンドスキャン（PassesFilter の OnGUI 内同期再帰走査を排除）──
+        private readonly object _filterScanLock = new object();
+        // マッチするフォルダ + その全先祖のフルパス集合（DrawNode→PassesFilter は参照のみ行う）
+        private HashSet<string> _filterMatchFolders = new HashSet<string>();
+        // スキャン世代（フィルタ再変更時に旧スキャンの結果を破棄するため）。
+        // volatile + _filterScanLock 内読み書きで統一（REVIEW 指摘対応: ロック外読みの排除）
+        private volatile int _filterScanGeneration;
+        // true = スキャン未確定（実行中 or 未開始）。未確定の間は全表示フォールバック（ちらつきよりフリーズ回避）
+        private bool _filterScanPending;
+
+        // ── 非同期ファイルスキャン（RescanFiles の IO をバックグラウンドへ移す。net35: ThreadPool + lock 方式）──
+        private readonly object _scanLock = new object();
+        // バックグラウンド構築済みのスキャン結果。null = 未完了。メインスレッドが ApplyPendingScan で取り出す
+        private List<SceneItem> _pendingScanItems;
+        // スキャン世代（スキャン中のフォルダ再切替時に旧結果を破棄）。
+        // volatile + _scanLock 内読み書きで統一（REVIEW 指摘対応: ロック外読みの排除）
+        private volatile int _scanGeneration;
 
         // サムネイルキャッシュ
         private Dictionary<string, Texture2D> _thumbCache = new Dictionary<string, Texture2D>();
@@ -332,7 +353,10 @@ namespace KK_SceneExplorer
 
         private void Update()
         {
-            // 非同期サムネイルロードの結果をメインスレッドで処理（1フレーム最大2件）
+            // 非同期ファイルスキャンの完了結果をメインスレッドで _items に反映
+            ApplyPendingScan();
+
+            // 非同期サムネイルロードの結果をメインスレッドで処理（1フレーム最大1件）
             ProcessThumbnailResults();
 
             // v3.3.1: 透明 uGUI ブロックレイヤーをウィンドウ矩形に追従させる。
@@ -358,6 +382,9 @@ namespace KK_SceneExplorer
                     if (!_visible) _visible = true;
                     RescanFiles();
                 }
+                // v3.3.2: モード遷移でツリールートが変わるため、フィルタ非空ならマッチ集合を新モードの
+                // ルートで再計算する（refresh ボタンと同列の扱い。旧モードの集合が残ると誤非表示になる）
+                StartFilterScan();
             }
 
             // v3.1.0: モード中は標準パネルの再表示を毎フレーム抑止（軽量な維持監視のみ。RescanFiles は呼ばない）
@@ -1061,12 +1088,18 @@ namespace KK_SceneExplorer
             {
                 _treeFilter = newFilter;
                 _dirChildrenCache.Clear();
+                _hasChildrenCache.Clear();
+                // v3.3.2: フィルタ変更時にバックグラウンドでマッチ集合を再計算（OnGUI 内の同期再帰走査を排除）
+                StartFilterScan();
             }
             if (GUILayout.Button("\u21bb", _toolbarButtonStyle, GUILayout.Width(24))) // ↻
             {
                 _expandedFolders.Clear();
                 _dirChildrenCache.Clear();
+                _hasChildrenCache.Clear();
                 RescanFiles();
+                // ディスク変更をマッチ集合へも反映（フィルタ空なら即リセットされる）
+                StartFilterScan();
             }
             GUILayout.EndHorizontal();
 
@@ -1933,7 +1966,7 @@ namespace KK_SceneExplorer
         private void RescanFiles()
         {
             _lastScannedFolder = GetCurrentBrowserFolder();
-            _items.Clear();
+            // 反映中も旧リストの描画を継続するため、_items のクリアは ApplyPendingScan 側で行う
             _selectedIndex = -1;
             _gridScroll = Vector2.zero;
 
@@ -1963,43 +1996,74 @@ namespace KK_SceneExplorer
             }
             if (string.IsNullOrEmpty(basePath) || !Directory.Exists(basePath)) return;
 
-            try
+            // v3.3.2: GetFiles + FileInfo 収集（NAS で数秒フリーズ級）をバックグラウンドへ移す。
+            // Unity API（Texture2D 等）には触れないため、SceneItem 構築はスレッド安全。
+            // 結果は Update→ApplyPendingScan がメインスレッドで _items に反映する。
+            int gen;
+            lock (_scanLock) gen = ++_scanGeneration;
+            string scanFolder = basePath;
+            ThreadPool.QueueUserWorkItem(delegate
             {
-                string[] files = SceneExplorerPlugin.ScenePaths.ScanFolder(basePath, "*.png");
-                if (files == null) return;
-
-                for (int i = 0; i < files.Length; i++)
+                List<SceneItem> scanned = new List<SceneItem>();
+                try
                 {
-                    string path = files[i];
-                    try
+                    string[] files = SceneExplorerPlugin.ScenePaths.ScanFolder(scanFolder, "*.png");
+                    if (files != null)
                     {
-                        // v3.2.2: 表示名はファイル名（LoadCharaFile の同期フルパースを一覧で行わない。
-                        // 数百ファイルで「必要mod探索エラー」と遅延が出るため。破損カードはロード時に無視される）
-                        var fi = new FileInfo(path);
-                        var item = new SceneItem
+                        for (int i = 0; i < files.Length; i++)
                         {
-                            FilePath = path,
-                            FileName = fi.Name,
-                            DisplayName = System.IO.Path.GetFileNameWithoutExtension(path),
-                            LastWriteTime = fi.LastWriteTime,
-                            FileSize = fi.Length,
-                            Thumbnail = null,
-                            ThumbLoaded = false
-                        };
-                        _items.Add(item);
-                    }
-                    catch (Exception ex)
-                    {
-                        SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] FileInfo error: " + path + " - " + ex.Message);
+                            string path = files[i];
+                            try
+                            {
+                                // v3.2.2: 表示名はファイル名（LoadCharaFile の同期フルパースを一覧で行わない。
+                                // 数百ファイルで「必要mod探索エラー」と遅延が出るため。破損カードはロード時に無視される）
+                                var fi = new FileInfo(path);
+                                var item = new SceneItem
+                                {
+                                    FilePath = path,
+                                    FileName = fi.Name,
+                                    DisplayName = System.IO.Path.GetFileNameWithoutExtension(path),
+                                    LastWriteTime = fi.LastWriteTime,
+                                    FileSize = fi.Length,
+                                    Thumbnail = null,
+                                    ThumbLoaded = false
+                                };
+                                scanned.Add(item);
+                            }
+                            catch (Exception ex)
+                            {
+                                SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] FileInfo error: " + path + " - " + ex.Message);
+                            }
+                        }
                     }
                 }
+                catch (Exception ex)
+                {
+                    SceneExplorerPlugin.Log.LogError("[SceneBrowser] Scan failed: " + ex.Message);
+                }
+                // スキャン中に別フォルダへ切替された（世代が進んだ）ら結果を破棄。
+                // 世代再チェックと採用を lock 内で原子的に行う
+                lock (_scanLock)
+                {
+                    if (gen != _scanGeneration) return;
+                    _pendingScanItems = scanned;
+                }
+            });
+        }
 
-                SortItems();
-            }
-            catch (Exception ex)
+        // Update（メインスレッド）から呼ぶ。完了したバックグラウンドスキャン結果を _items へ反映
+        private void ApplyPendingScan()
+        {
+            List<SceneItem> scanned;
+            lock (_scanLock)
             {
-                SceneExplorerPlugin.Log.LogError("[SceneBrowser] Scan failed: " + ex.Message);
+                if (_pendingScanItems == null) return;
+                scanned = _pendingScanItems;
+                _pendingScanItems = null;
             }
+            _items.Clear();
+            _items.AddRange(scanned);
+            SortItems();
         }
 
         private void SortItems()
@@ -2173,10 +2237,11 @@ namespace KK_SceneExplorer
             }
         }
 
-        // メインスレッド: 結果キューを1フレーム最大2件処理（Update の先頭で呼ぶ）
+        // メインスレッド: 結果キューを1フレーム最大1件処理（Update の先頭で呼ぶ）。
+        // v3.3.2: 2→1件に間引き（PNG デコード＋ガンマ補正のコストが OnGUI フレームレートに波及するため）
         private void ProcessThumbnailResults()
         {
-            for (int n = 0; n < 2; n++)
+            for (int n = 0; n < 1; n++)
             {
                 ThumbLoadResult res;
                 lock (_thumbResLock)
@@ -2305,6 +2370,7 @@ namespace KK_SceneExplorer
                 _expandedFolders.Add(path);
             }
             _dirChildrenCache.Remove(path);
+            _hasChildrenCache.Remove(path);
         }
 
         private void SelectFolder(string path)
@@ -2343,14 +2409,20 @@ namespace KK_SceneExplorer
 
         private bool HasSubdirectories(string path)
         {
+            // v3.3.2: OnGUI 毎フレームの Directory.GetDirectories を排除（DrawNode から毎フレーム呼ばれる）。
+            // 結果をキャッシュし、無効化は _dirChildrenCache と同じタイミング（フィルタ変更 / 更新ボタン / ToggleExpand）で行う
+            bool cached;
+            if (_hasChildrenCache.TryGetValue(path, out cached)) return cached;
             try
             {
-                return Directory.GetDirectories(path).Length > 0;
+                cached = Directory.GetDirectories(path).Length > 0;
             }
             catch
             {
-                return false;
+                cached = false;
             }
+            _hasChildrenCache[path] = cached;
+            return cached;
         }
 
         private List<DirEntry> GetCachedChildren(string path)
@@ -2395,16 +2467,126 @@ namespace KK_SceneExplorer
             if (string.IsNullOrEmpty(_treeFilter)) return true;
             if (name.IndexOf(_treeFilter, StringComparison.OrdinalIgnoreCase) >= 0) return true;
 
-            // 子孫に一致するものがあるかチェック（再帰的表示用）
+            // v3.3.2: 子孫一致判定はバックグラウンドスキャン結果の参照のみ（OnGUI 内の同期再帰走査を排除）。
+            // スキャン未確定の間は全表示（true）でフォールバック — ちらつきよりフリーズを優先して回避
+            lock (_filterScanLock)
+            {
+                if (_filterScanPending) return true;
+                HashSet<string> matches = _filterMatchFolders;
+                return matches != null && matches.Contains(folderPath);
+            }
+        }
+
+        // フィルタ変更・更新ボタン時に呼ぶ（メインスレッド）。マッチするフォルダ集合をバックグラウンドで計算する。
+        // スキャン中にフィルタが再変更されたら世代カウンタで旧結果を破棄し、最新フィルタの結果のみ採用する
+        private void StartFilterScan()
+        {
+            string filter = _treeFilter;
+            if (string.IsNullOrEmpty(filter))
+            {
+                // フィルタ空: 集合は不要（PassesFilter は常に true）。世代を進めて進行中スキャンの結果を破棄させる
+                lock (_filterScanLock)
+                {
+                    _filterScanGeneration++;
+                    _filterMatchFolders = new HashSet<string>();
+                    _filterScanPending = false;
+                }
+                return;
+            }
+            // ルート群はメインスレッドで確定させてからスレッドに渡す（GetModeRootFolders 等はスレッド非安全のため）
+            List<string> roots = GetTreeRoots();
+            int gen;
+            lock (_filterScanLock)
+            {
+                gen = ++_filterScanGeneration;
+                _filterScanPending = true;
+            }
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                HashSet<string> matches = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                for (int i = 0; i < roots.Count; i++)
+                {
+                    // ルート自体も子孫一致なら表示対象（DrawNode のルートは PassesFilter を通る）
+                    if (CollectFilterMatches(roots[i], filter, matches)) matches.Add(roots[i]);
+                }
+                // スキャン中にフィルタが再変更された（世代が進んだ）ら結果を破棄。
+                // 世代再チェックと採用を lock 内で原子的に行う
+                lock (_filterScanLock)
+                {
+                    if (gen != _filterScanGeneration) return;
+                    _filterMatchFolders = matches;
+                    _filterScanPending = false;
+                }
+            });
+        }
+
+        // バックグラウンドスレッド用: folder 配下で「自名前 or 子孫名がフィルタ一致」するフォルダとその全先祖を matches へ集める。
+        // 戻り値は folder 配下にマッチが存在したか。IO のみで Unity API には触れない
+        private static bool CollectFilterMatches(string folder, string filter, HashSet<string> matches)
+        {
+            string[] subDirs;
             try
             {
-                string[] subDirs = Directory.GetDirectories(folderPath, "*" + _treeFilter + "*", SearchOption.AllDirectories);
-                return subDirs.Length > 0;
+                subDirs = Directory.GetDirectories(folder);
             }
             catch
             {
                 return false;
             }
+            bool any = false;
+            for (int i = 0; i < subDirs.Length; i++)
+            {
+                string dir = subDirs[i];
+                string dirName = System.IO.Path.GetFileName(dir);
+                bool selfMatch = !string.IsNullOrEmpty(dirName) &&
+                    dirName.IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0;
+                bool childMatch = CollectFilterMatches(dir, filter, matches);
+                if (selfMatch || childMatch)
+                {
+                    matches.Add(dir);
+                    any = true;
+                }
+            }
+            return any;
+        }
+
+        // ツリーのルートパス群を収集（メインスレッド用）。DrawTreePanel の roots 構築ロジックと同じ基準
+        private List<string> GetTreeRoots()
+        {
+            List<string> roots = new List<string>();
+            if (SceneExplorerPlugin.CurrentBrowserMode != SceneExplorerPlugin.BrowserMode.Scene)
+            {
+                string[] modeRoots = SceneExplorerPlugin.GetModeRootFolders();
+                for (int i = 0; i < modeRoots.Length; i++)
+                {
+                    string root = modeRoots[i];
+                    if (!string.IsNullOrEmpty(root) && Directory.Exists(root))
+                    {
+                        roots.Add(root);
+                    }
+                }
+            }
+            else
+            {
+                string localRoot = UserData.Create("studio/scene");
+                if (!string.IsNullOrEmpty(localRoot) && Directory.Exists(localRoot))
+                {
+                    roots.Add(localRoot);
+                }
+                string[] configuredRoots = SceneExplorerPlugin.ScenePaths.GetConfiguredSceneFolders();
+                if (configuredRoots != null)
+                {
+                    for (int i = 0; i < configuredRoots.Length; i++)
+                    {
+                        string root = configuredRoots[i];
+                        if (!string.IsNullOrEmpty(root) && Directory.Exists(root))
+                        {
+                            roots.Add(root);
+                        }
+                    }
+                }
+            }
+            return roots;
         }
 
         // ═══════════════════════════════════════════════════════
