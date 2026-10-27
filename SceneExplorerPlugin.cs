@@ -1130,17 +1130,6 @@ namespace KK_SceneExplorer
 					Log.LogWarning("パッチ失敗: SceneLoadScene.OnClickClose");
 				}
 
-				MethodInfo t4 = AccessTools.Method(typeof(Studio.Studio), "SaveScene");
-				if (t4 != null)
-				{
-					harmony.Patch(t4, prefix: new HarmonyMethod(AccessTools.Method(typeof(Patches), nameof(SaveScenePrefix))));
-					Log.LogInfo("パッチ適用: Studio.Studio.SaveScene");
-				}
-				else
-				{
-					Log.LogWarning("パッチ失敗: Studio.Studio.SaveScene");
-				}
-
 				MethodInfo t5 = AccessTools.Method(typeof(Studio.Studio), "LoadSceneCoroutine");
 				if (t5 != null)
 				{
@@ -1155,7 +1144,9 @@ namespace KK_SceneExplorer
 				MethodInfo t6 = AccessTools.Method(typeof(Studio.SceneInfo), "Save", new Type[] { typeof(string) });
 				if (t6 != null)
 				{
-					harmony.Patch(t6, postfix: new HarmonyMethod(AccessTools.Method(typeof(Patches), nameof(SceneInfoSavePostfix))) { priority = 900 });
+					harmony.Patch(t6,
+						postfix: new HarmonyMethod(AccessTools.Method(typeof(Patches), nameof(SceneInfoSavePostfix))) { priority = 900 },
+						finalizer: new HarmonyMethod(AccessTools.Method(typeof(Patches), nameof(SceneInfoSaveFinalizer))));
 					Log.LogInfo("パッチ適用: Studio.SceneInfo.Save");
 				}
 				else
@@ -1253,31 +1244,6 @@ namespace KK_SceneExplorer
 				SceneExplorerPlugin.applyingSelection = false;
 			}
 
-			private static bool SaveScenePrefix(Studio.Studio __instance)
-			{
-				try
-				{
-					foreach (KeyValuePair<int, ObjectCtrlInfo> item in __instance.dicObjectCtrl)
-					{
-						item.Value.OnSavePreprocessing();
-					}
-					__instance.sceneInfo.cameraSaveData = __instance.cameraCtrl.Export();
-
-					DateTime now = DateTime.Now;
-					string fileName = string.Format("{0}_{1:00}{2:00}_{3:00}{4:00}_{5:00}_{6:000}.png",
-						now.Year, now.Month, now.Day, now.Hour, now.Minute, now.Second, now.Millisecond);
-
-					string localPath = Path.Combine(UserData.Create("studio/scene"), fileName);
-					SaveToFile(__instance, localPath);
-					Log.LogInfo("シーンを保存しました: " + localPath);
-				}
-				catch (Exception ex)
-				{
-					Log.LogError("シーンの保存に失敗しました: " + ex.Message);
-				}
-				return false;
-			}
-
 			private static void LoadSceneCoroutinePrefix(string _path)
 			{
 				try
@@ -1335,6 +1301,18 @@ namespace KK_SceneExplorer
 				{
 					TransferNow(_path, dest);
 				}
+			}
+
+			/// <summary>v3.4.2: 保存失敗の検知。SaveScene の prefix を廃止したため、その try/catch の代わりに
+			/// SceneInfo.Save の finalizer で例外を拾う（postfix は例外時に実行されない）。
+			/// __exception は設定しない＝例外はそのまま伝播させる。</summary>
+			private static void SceneInfoSaveFinalizer(string _path, Exception __exception)
+			{
+				if (__exception == null)
+				{
+					return;
+				}
+				Log.LogError("シーンの保存に失敗しました: " + _path + " | " + __exception);
 			}
 
 			// v3.1.0: CharaList のインスタンスを保持（Awake はスタジオ起動時に一度だけ呼ばれる。女/男タブは別インスタンスのためリストで保持）
@@ -1556,12 +1534,6 @@ namespace KK_SceneExplorer
 				{
 					Log.LogError("ネットワーク転送に失敗しました（ローカルに残します）: " + ex.ToString());
 				}
-			}
-
-			private static void SaveToFile(Studio.Studio __instance, string path)
-			{
-				Directory.CreateDirectory(Path.GetDirectoryName(path));
-				__instance.sceneInfo.Save(path);
 			}
 		}
 	}
