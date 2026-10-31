@@ -50,6 +50,8 @@
       <HintPath>..\..\BepInEx\core\0Harmony.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- PNG デコード（WebP 変換の前段）。.NET Framework 標準 -->
+    <Reference Include="System.Drawing" />
   </ItemGroup>
 
   <!-- _research 配下は開発用スクリプト（単体で csc する）。ビルド対象から外す -->

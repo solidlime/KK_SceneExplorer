@@ -1,5 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Reflection;
 using System.Reflection.Emit;
@@ -1242,7 +1244,10 @@ namespace KK_SceneExplorer
 					MethodInfo loadVersion = AccessTools.Method(typeof(Studio.SceneInfo), "Load",
 						new Type[] { typeof(string), typeof(Version).MakeByRefType() });
 					if (loadVersion != null) harmony.Patch(loadVersion, prefix: loadPrefix);
-					Log.LogInfo("パッチ適用: ME texture dedupe (TextureSaveHandler / SceneInfo.Save / SceneInfo.Load)");
+					Func<byte[], byte[]> encoder = BuildWebPEncoder();
+					MeTextureDedupe.SetWebPEncoder(encoder);
+					Log.LogInfo("パッチ適用: ME texture dedupe (TextureSaveHandler / SceneInfo.Save / SceneInfo.Load)"
+						+ (encoder == null ? " / WebP 変換なし（PNG 格納）" : " / WebP ロスレス変換あり（libwebp / 別スレッド）"));
 				}
 				catch (Exception ex)
 				{
@@ -1254,6 +1259,106 @@ namespace KK_SceneExplorer
 			private static bool IsDictionaryCompatible(Type type)
 			{
 				return type == typeof(object) || typeof(System.Collections.IDictionary).IsAssignableFrom(type);
+			}
+
+			// 共有表に格納する PNG を WebP(ロスレス) に変換する。
+			// libwebp.dll を P/Invoke で直接叩くので Texture2D に触らず、ワーカースレッドで動かせる。
+			// DLL は build.cmd が BepInEx/plugins へコピーする（ME 同梱の libwebp.lib と同一バイナリ）。
+			private const string WebPDll = "libwebp";
+
+			[DllImport(WebPDll, CallingConvention = CallingConvention.Cdecl)]
+			private static extern int WebPEncodeLosslessRGBA(byte[] rgba, int width, int height, int stride, out IntPtr output);
+
+			[DllImport(WebPDll, CallingConvention = CallingConvention.Cdecl)]
+			private static extern void WebPFree(IntPtr output);
+
+			/// <summary>PNG バイト列をロスレス WebP に変換する。失敗時は null。</summary>
+			internal static byte[] EncodePngToWebP(byte[] png)
+			{
+				using (MemoryStream ms = new MemoryStream(png, false))
+				using (Bitmap bmp = new Bitmap(ms))
+				{
+					int w = bmp.Width, h = bmp.Height;
+					BitmapData bd = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+					try
+					{
+						byte[] rgba = new byte[w * h * 4];
+						byte[] row = new byte[w * 4];
+						for (int y = 0; y < h; y++)
+						{
+							// net35 に IntPtr.Add が無いので自前で足す
+							Marshal.Copy(new IntPtr(bd.Scan0.ToInt64() + (long)y * bd.Stride), row, 0, row.Length);
+							int o = y * w * 4;
+							for (int x = 0; x < w; x++)
+							{
+								// GDI+ は BGRA。WebP は RGBA
+								rgba[o] = row[x * 4 + 2];
+								rgba[o + 1] = row[x * 4 + 1];
+								rgba[o + 2] = row[x * 4];
+								rgba[o + 3] = row[x * 4 + 3];
+								o += 4;
+							}
+						}
+
+						IntPtr outPtr;
+						int size = WebPEncodeLosslessRGBA(rgba, w, h, w * 4, out outPtr);
+						if (size <= 0) return null;
+						try
+						{
+							byte[] webp = new byte[size];
+							Marshal.Copy(outPtr, webp, 0, size);
+							return webp;
+						}
+						finally { WebPFree(outPtr); }
+					}
+					finally { bmp.UnlockBits(bd); }
+				}
+			}
+
+			[DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
+			private static extern IntPtr LoadLibraryW(string path);
+
+			/// <summary>plugins 直下の libwebp.dll をフルパスで先に読み込む。Unity の検索パスには入っていない。</summary>
+			private static bool EnsureWebPLoaded()
+			{
+				// 同梱先（plugins/KK_SceneExplorer/libwebp.dll）を最優先。
+				// 次点は置き場所が変わった旧配置と、MaterialEditor 同梱の同一バイナリ
+				string[] candidates = new string[]
+				{
+					Path.Combine(Path.Combine(Paths.PluginPath, "KK_SceneExplorer"), "libwebp.dll"),
+					Path.Combine(Paths.PluginPath, "libwebp.dll"),
+					Path.Combine(Path.Combine(Paths.PluginPath, "KK_Plugins"), "libwebp.lib"),
+				};
+				foreach (string path in candidates)
+				{
+					if (!File.Exists(path)) continue;
+					try
+					{
+						if (LoadLibraryW(path) != IntPtr.Zero)
+						{
+							Log.LogInfo("libwebp を読み込んだ: " + path);
+							// 解決できるか実際に呼んで確かめる
+							WebPFree(IntPtr.Zero);
+							return true;
+						}
+						Log.LogWarning("LoadLibrary に失敗: " + path + " (err=" + Marshal.GetLastWin32Error() + ")");
+					}
+					catch (Exception ex)
+					{
+						Log.LogWarning("libwebp 読み込み例外: " + path + " / " + ex.Message);
+					}
+				}
+				return false;
+			}
+
+			private static Func<byte[], byte[]> BuildWebPEncoder()
+			{
+				if (!EnsureWebPLoaded())
+				{
+					Log.LogWarning("libwebp.dll が見つからないため WebP 変換を無効化（PNG で保存します）");
+					return null;
+				}
+				return EncodePngToWebP;
 			}
 
 			private static void SceneInfoSaveDedupePrefix()

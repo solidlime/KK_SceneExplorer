@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Text;
 using BepInEx.Logging;
 
@@ -59,9 +60,50 @@ namespace KK_SceneExplorer
 		private static readonly Dictionary<long, byte[]> pendingBlob = new Dictionary<long, byte[]>();
 		private static readonly Dictionary<long, object> markerTokens = new Dictionary<long, object>();
 
+		// 変換結果のキャッシュ（hash -> WebP バイト列）。再起動で消えるが、連続保存では効く
+		private static readonly Dictionary<long, byte[]> webpCache = new Dictionary<long, byte[]>();
+		// PNG -> WebP(ロスレス) 変換。null = 変換しない（PNG のまま格納）
+		private static Func<byte[], byte[]> webpEncoder;
+		// バックグラウンド変換の待ち行列（FIFO）。Update ごとに1枚だけ処理する
+		private static readonly Queue<KeyValuePair<long, byte[]>> convertQueue = new Queue<KeyValuePair<long, byte[]>>();
+		// 変換待ちの重複登録を防ぐ
+		private static readonly HashSet<long> convertQueued = new HashSet<long>();
+
 		// 直近に読み込んだシーンの共有表。null = チャンク無し（バニラ）
 		private static Dictionary<long, byte[]> loadedBlob;
 		private static string loadedPath;
+
+		/// <summary>PNG を WebP に変換する関数を差し込む。null で無効化（PNG のまま格納）。</summary>
+		internal static void SetWebPEncoder(Func<byte[], byte[]> encoder)
+		{
+			webpEncoder = encoder;
+			ClearWebPCache();
+		}
+
+		/// <summary>変換済みなら WebP、未変換なら PNG をそのまま返す（保存を止めない）。</summary>
+		private static byte[] ToWebP(long hash, byte[] png)
+		{
+			byte[] cached;
+			lock (convertLock)
+			{
+				if (webpCache.TryGetValue(hash, out cached)) return cached;
+			}
+			return png;
+		}
+
+		/// <summary>変換待ち枚数（診断用）。</summary>
+		internal static int PendingConvertCount { get { lock (convertLock) return convertQueue.Count; } }
+
+		/// <summary>変換結果と待ち行列を捨てる。</summary>
+		internal static void ClearWebPCache()
+		{
+			lock (convertLock)
+			{
+				webpCache.Clear();
+				convertQueue.Clear();
+				convertQueued.Clear();
+			}
+		}
 
 		#region 保存
 
@@ -114,8 +156,9 @@ namespace KK_SceneExplorer
 					long hash = (long)hashProp.GetValue(container, null);
 					object markerToken = GetMarkerToken(hash);
 					if (markerToken == null) continue;
+					// 格納するのは WebP（ロスレス）。ロード時は LoadTexture2DFromBytes が WebP を判別する
 					// hash 衝突時は共有表を汚さず、このテクスチャはインライン（マーカー化しない）で保存する
-					if (!TryRegisterBlob(pendingBlob, hash, data)) continue;
+					if (!TryRegisterBlob(pendingBlob, hash, ToWebP(hash, data))) continue;
 
 					object originalToken = tokenField.GetValue(container);
 					tokenField.SetValue(container, markerToken);
@@ -153,6 +196,35 @@ namespace KK_SceneExplorer
 		}
 
 		/// <summary>SaveBundled finalizer: 例外時も含めて必ず実データへ戻す。</summary>
+		/// <summary>WebP 未変換のテクスチャをバックグラウンド変換の待ち行列へ入れる。</summary>
+		private static void QueueConvert(Dictionary<long, byte[]> table)
+		{
+			if (webpEncoder == null || table == null) return;
+			int added = 0;
+			lock (convertLock)
+			{
+				foreach (KeyValuePair<long, byte[]> kv in table)
+				{
+					if (webpCache.ContainsKey(kv.Key) || !convertQueued.Add(kv.Key)) continue;
+					if (IsWebP(kv.Value)) { convertQueued.Remove(kv.Key); webpCache[kv.Key] = kv.Value; continue; }
+					convertQueue.Enqueue(kv);
+					added++;
+				}
+			}
+			if (added > 0)
+			{
+				Log.LogInfo("[SceneExplorer] ME texture dedupe: WebP 変換を " + added + " 枚キューに追加（別スレッドで進めます）");
+				PumpConvert();
+			}
+		}
+
+		/// <summary>RIFF....WEBP 判定。</summary>
+		private static bool IsWebP(byte[] d)
+		{
+			return d != null && d.Length > 12 && d[0] == 0x52 && d[1] == 0x49 && d[2] == 0x46 && d[3] == 0x46
+				&& d[8] == 0x57 && d[9] == 0x45 && d[10] == 0x42 && d[11] == 0x50;
+		}
+
 		internal static void RestoreMarkers(List<object[]> state)
 		{
 			if (state == null) return;
@@ -166,6 +238,53 @@ namespace KK_SceneExplorer
 		/// <summary>毎フレームのリーク検査。SceneInfo.Save は 1 コールスタックで完結するので、フレームを跨いで
 		/// savingDepth が残っていたら定義上リーク（高優先度 prefix が本体を止めた等）。
 		/// 放置すると次のキャラカード保存がマーカー化されてテクスチャが恒久消失する。</summary>
+		// ワーカースレッドが動いているか（0/1）
+		private static int convertInFlight;
+		// キューとキャッシュはワーカースレッドから触るので全てこのロックで保護する
+		private static readonly object convertLock = new object();
+
+		/// <summary>待ち行列が空になるまでワーカースレッドで変換する。ゲームスレッドは一切ブロックしない。</summary>
+		private static void PumpConvert()
+		{
+			if (webpEncoder == null) return;
+			if (Interlocked.CompareExchange(ref convertInFlight, 1, 0) != 0) return;
+
+			ThreadPool.QueueUserWorkItem(delegate(object _)
+			{
+				try
+				{
+					while (true)
+					{
+						KeyValuePair<long, byte[]> item;
+						lock (convertLock)
+						{
+							if (convertQueue.Count == 0) break;
+							item = convertQueue.Dequeue();
+							convertQueued.Remove(item.Key);
+							if (webpCache.ContainsKey(item.Key)) continue;
+						}
+
+						byte[] webp = webpEncoder(item.Value);
+						if (webp != null && webp.Length < item.Value.Length)
+						{
+							lock (convertLock) webpCache[item.Key] = webp;
+						}
+					}
+
+					int done;
+					lock (convertLock) done = webpCache.Count;
+					Log.LogInfo("[SceneExplorer] ME texture dedupe: WebP 変換が完了（" + done + " 枚）。次回の保存からサイズが減ります");
+				}
+				catch (Exception ex)
+				{
+					Log.LogWarning("[SceneExplorer] ME texture dedupe: WebP 変換に失敗（PNG で保存します）: " + ex.Message);
+					webpEncoder = null;
+					lock (convertLock) { convertQueue.Clear(); convertQueued.Clear(); }
+				}
+				finally { Interlocked.Exchange(ref convertInFlight, 0); }
+			});
+		}
+
 		internal static void Tick(int frame)
 		{
 			if (savingDepth <= 0) return;
@@ -314,6 +433,7 @@ namespace KK_SceneExplorer
 				Dictionary<long, byte[]> table = ReadChunk(path, false);
 				if (table == null) return;
 				loadedBlob = table;
+				QueueConvert(table);
 				Log.LogInfo("[SceneExplorer] ME texture dedupe チャンク検出: " + table.Count + " 枚を展開: " + path);
 			}
 			catch (Exception ex)
