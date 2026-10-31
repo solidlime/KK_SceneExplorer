@@ -72,6 +72,8 @@ namespace KK_SceneExplorer
 		// 直近に読み込んだシーンの共有表。null = チャンク無し（バニラ）
 		private static Dictionary<long, byte[]> loadedBlob;
 		private static string loadedPath;
+		// 同じパスの prefix 二重実行（Load(string) → Load(string, out Version)）を弾くための試行済みフラグ
+		private static bool loadAttempted;
 
 		/// <summary>PNG を WebP に変換する関数を差し込む。null で無効化（PNG のまま格納）。</summary>
 		internal static void SetWebPEncoder(Func<byte[], byte[]> encoder)
@@ -313,37 +315,9 @@ namespace KK_SceneExplorer
 					return false;
 				}
 
-				long uniqueBytes = 0;
-				foreach (KeyValuePair<long, byte[]> kv in pendingBlob)
-				{
-					uniqueBytes += kv.Value.Length;
-				}
-				long chunkSize = ChunkHeaderSize + ChunkFooterSize + uniqueBytes + (long)pendingBlob.Count * EntryHeaderSize;
-				if (chunkSize > uint.MaxValue)
-				{
-					Log.LogError("[SceneExplorer] ME texture dedupe: チャンクが " + FormatBytes(chunkSize) + " で 4GiB を超えるため中止（このシーンのテクスチャは復元できません）: " + path);
-					return false;
-				}
-
-				long rawBytes = 0;
 				using (FileStream fs = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read))
 				{
-					long start = fs.Position;
-					BinaryWriter writer = new BinaryWriter(fs);
-					writer.Write(ChunkMagic);
-					writer.Write((uint)pendingBlob.Count);
-					foreach (KeyValuePair<long, byte[]> kv in pendingBlob)
-					{
-						writer.Write(kv.Key);
-						writer.Write((uint)kv.Value.Length);
-						writer.Write(kv.Value);
-						rawBytes += kv.Value.Length;
-					}
-					writer.Flush();
-					long payloadLength = fs.Position - start;
-					writer.Write((uint)payloadLength);
-					writer.Write(ChunkMagic);
-					writer.Flush();
+					if (!WriteChunk(fs, path)) return false;
 					// OS キャッシュ止まりでは検証が「同じキャッシュを読み直した」以上の意味を持たない
 					fs.Flush();
 #pragma warning disable 618 // net35 の SafeFileHandle は DangerousGetHandle 経由になり、転送層と揃わない
@@ -353,10 +327,6 @@ namespace KK_SceneExplorer
 					}
 #pragma warning restore 618
 				}
-
-				Log.LogInfo("[SceneExplorer] ME texture dedupe 追記: ユニーク " + pendingBlob.Count
-					+ " 枚 / " + FormatBytes(uniqueBytes) + "（追記 " + FormatBytes(rawBytes + ChunkHeaderSize + ChunkFooterSize
-					+ (long)pendingBlob.Count * EntryHeaderSize) + "）: " + path);
 
 				// 追記したものを読み直して検証（データ本体は読まずヘッダだけ）
 				if (!VerifyChunk(path)) return false;
@@ -373,10 +343,91 @@ namespace KK_SceneExplorer
 			}
 		}
 
+		/// <summary>WriteLocalCopy=false 用: メモリ上のシーン本体にチャンクを追記した完全なバイト列を返す。null = 失敗。</summary>
+		internal static byte[] AppendChunkToBuffer(byte[] body, string path)
+		{
+			savingDepth = 0;
+			try
+			{
+				if (body == null) return null;
+				if (pendingBlob.Count == 0)
+				{
+					Log.LogInfo("[SceneExplorer] ME texture dedupe: 対象テクスチャ無し（チャンク不要 = バニラ）");
+					return body;
+				}
+				using (MemoryStream ms = new MemoryStream(body.Length + 1048576))
+				{
+					ms.Write(body, 0, body.Length);
+					if (!WriteChunk(ms, path)) return null;
+					byte[] full = ms.ToArray();
+					// 追記結果をメモリ上で検証（ファイル版と同じ検査）
+					if (!VerifyChunkCore(new MemoryStream(full, false), path)) return null;
+					return full;
+				}
+			}
+			catch (Exception ex)
+			{
+				Log.LogError("[SceneExplorer] ME texture dedupe: メモリ上のシーンへチャンクを追記できなかった（このシーンのテクスチャは復元できません）: " + ex);
+				return null;
+			}
+			finally
+			{
+				pendingBlob.Clear();
+			}
+		}
+
+		/// <summary>チャンク本体（ヘッダ + 全エントリ + フッタ）を output の現在位置へ書く。</summary>
+		private static bool WriteChunk(Stream output, string path)
+		{
+			long uniqueBytes = 0;
+			foreach (KeyValuePair<long, byte[]> kv in pendingBlob)
+			{
+				uniqueBytes += kv.Value.Length;
+			}
+			long chunkSize = ChunkHeaderSize + ChunkFooterSize + uniqueBytes + (long)pendingBlob.Count * EntryHeaderSize;
+			if (chunkSize > uint.MaxValue)
+			{
+				Log.LogError("[SceneExplorer] ME texture dedupe: チャンクが " + FormatBytes(chunkSize) + " で 4GiB を超えるため中止（このシーンのテクスチャは復元できません）: " + path);
+				return false;
+			}
+
+			long rawBytes = 0;
+			long start = output.Position;
+			BinaryWriter writer = new BinaryWriter(output);
+			writer.Write(ChunkMagic);
+			writer.Write((uint)pendingBlob.Count);
+			foreach (KeyValuePair<long, byte[]> kv in pendingBlob)
+			{
+				writer.Write(kv.Key);
+				writer.Write((uint)kv.Value.Length);
+				writer.Write(kv.Value);
+				rawBytes += kv.Value.Length;
+			}
+			writer.Flush();
+			long payloadLength = output.Position - start;
+			writer.Write((uint)payloadLength);
+			writer.Write(ChunkMagic);
+			writer.Flush();
+
+			Log.LogInfo("[SceneExplorer] ME texture dedupe 追記: ユニーク " + pendingBlob.Count
+				+ " 枚 / " + FormatBytes(uniqueBytes) + "（追記 " + FormatBytes(rawBytes + ChunkHeaderSize + ChunkFooterSize
+				+ (long)pendingBlob.Count * EntryHeaderSize) + "）: " + path);
+			return true;
+		}
+
 		/// <summary>追記後の検証。書き出した pendingBlob と、読み直したチャンクの枚数/hash 集合が一致するか。</summary>
 		internal static bool VerifyChunk(string path)
 		{
-			Dictionary<long, byte[]> verify = ReadChunk(path, true);
+			using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+			{
+				return VerifyChunkCore(stream, path);
+			}
+		}
+
+		private static bool VerifyChunkCore(Stream stream, string path)
+		{
+			long bodyLength;
+			Dictionary<long, byte[]> verify = ReadChunk(stream, true, out bodyLength);
 			if (verify == null)
 			{
 				Log.LogError("[SceneExplorer] ME texture dedupe: チャンク追記後の検証に失敗（チャンクを読めない）: " + path);
@@ -418,29 +469,50 @@ namespace KK_SceneExplorer
 
 		#region ロード
 
-		/// <summary>SceneInfo.Load prefix: チャンクを読んで共有表を用意する（無ければ null のまま＝素通り）。</summary>
+		/// <summary>SceneInfo.Load prefix: チャンクを読んで共有表とシーン本体を用意する（チャンク無し = 素通り）。
+		/// 本体はここで 1 回だけ読み、SceneInfo 本体の読み込みは MemoryReadStream からメモリで行う。</summary>
 		internal static void BeginSceneLoad(string path)
 		{
 			if (string.IsNullOrEmpty(path)) return;
-			if (loadedBlob != null && string.Equals(path, loadedPath, StringComparison.OrdinalIgnoreCase)) return;
+			// Load(string) は Load(string, out Version) を呼ぶだけなので、両方の prefix で
+			// 同じパスが 2 回来る。loadedBlob が null（バニラ）でも再走しないよう試行済みで弾く
+			if (loadAttempted && string.Equals(path, loadedPath, StringComparison.OrdinalIgnoreCase)) return;
 
+			loadAttempted = true;
 			loadedBlob = null;
 			loadedPath = path;
 			if (!File.Exists(path)) return;
 
 			try
 			{
-				Dictionary<long, byte[]> table = ReadChunk(path, false);
-				if (table == null) return;
-				loadedBlob = table;
-				QueueConvert(table);
-				Log.LogInfo("[SceneExplorer] ME texture dedupe チャンク検出: " + table.Count + " 枚を展開: " + path);
+				using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+				{
+					long bodyLength;
+					Dictionary<long, byte[]> table = ReadChunk(stream, false, out bodyLength);
+					if (table == null) return;
+					loadedBlob = table;
+					// シーン本体（チャンク手前まで）もここで読む。開いたまま読むのでディスクは 1 回だけ
+					byte[] body = ReadBody(stream, bodyLength);
+					if (body != null) MemoryReadStream.Cache(path, body);
+					QueueConvert(table);
+					Log.LogInfo("[SceneExplorer] ME texture dedupe チャンク検出: " + table.Count + " 枚を展開: " + path);
+				}
 			}
 			catch (Exception ex)
 			{
 				loadedBlob = null;
 				Log.LogWarning("[SceneExplorer] ME texture dedupe: チャンク読取失敗（バニラとして読み込みます）: " + ex.Message);
 			}
+		}
+
+		/// <summary>シーン本体（チャンク手前まで）を読む。stream は先頭から読む前提。</summary>
+		private static byte[] ReadBody(Stream stream, long length)
+		{
+			if (length <= 0 || length > int.MaxValue) return null;
+			stream.Seek(0, SeekOrigin.Begin);
+			byte[] body = new byte[(int)length];
+			if (!ReadFull(stream, body, body.Length)) return null;
+			return body;
 		}
 
 		/// <summary>LoadBundled postfix: マーカーを実データへ戻す。</summary>
@@ -455,11 +527,13 @@ namespace KK_SceneExplorer
 					Log.LogError("[SceneExplorer] ME texture dedupe: LoadBundled の戻り値が辞書でないためマーカーを展開できません: " + result.GetType().FullName);
 				}
 				loadedPath = null;
+				loadAttempted = false;
 				return;
 			}
 			if (dict.Count == 0)
 			{
 				loadedPath = null;
+				loadAttempted = false;
 				return;
 			}
 
@@ -512,12 +586,23 @@ namespace KK_SceneExplorer
 				Log.LogWarning("[SceneExplorer] ME texture dedupe: TextureContainer 型を解決できず展開できませんでした: " + loadedPath);
 			}
 			loadedPath = null;
+			loadAttempted = false;
 		}
 
-		/// <summary>末尾の dedupe チャンクを読む。headersOnly = データ本体を読まず hash と長さだけ（検証用）。</summary>
+		/// <summary>末尾の dedupe チャンクを読む。headersOnly = データ本体を読まず hash と長さだけ（検証用）。
 		internal static Dictionary<long, byte[]> ReadChunk(string path, bool headersOnly)
 		{
 			using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+			{
+				long bodyLength;
+				return ReadChunk(stream, headersOnly, out bodyLength);
+			}
+		}
+
+		/// <summary>末尾の dedupe チャンクをストリームから読む。bodyLength = チャンク手前までの長さ（シーン本体）。</summary>
+		internal static Dictionary<long, byte[]> ReadChunk(Stream stream, bool headersOnly, out long bodyLength)
+		{
+			bodyLength = -1;
 			{
 				long fileLength = stream.Length;
 				if (fileLength < ChunkFooterSize + ChunkHeaderSize) return null;
@@ -564,6 +649,7 @@ namespace KK_SceneExplorer
 
 				// フッタ直前でぴったり終わることまで確認する（破損チャンクは捨てる）
 				if (stream.Position != start + payloadLength) return null;
+				bodyLength = start;
 				return table;
 			}
 		}

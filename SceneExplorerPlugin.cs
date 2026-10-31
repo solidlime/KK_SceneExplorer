@@ -62,6 +62,8 @@ namespace KK_SceneExplorer
 		internal static ConfigEntry<string> LastFolder;
 		/// <summary>ME テクスチャ dedupe の有効化（既定 OFF。ON にしたシーンはプラグイン無しで復元不可）</summary>
 		public static ConfigEntry<bool> DedupeEnabled;
+		// シーン保存時にローカルへファイルを作るか（既定 false = メモリ上のバイト列を最終保存先へ直接書く）
+		public static ConfigEntry<bool> WriteLocalCopy;
 
 		internal static string lastSceneFolder;
 		internal static string lastLoadedFolder;
@@ -578,6 +580,10 @@ namespace KK_SceneExplorer
 			// 実機で保存→ロード往復を確認済み（1.1GB → 209MB）。変更は次回起動から効く（Awake でパッチを張るため）
 			DedupeEnabled = Config.Bind("Dedupe", "Enabled", true,
 				"MaterialEditor テクスチャのシーン横断 dedupe を有効にする（変更は再起動後）");
+			// false = 保存はメモリ上で完結し、最終保存先（NAS/ローカル）へ 1 回だけ書く。
+			// 後続の mod がローカルファイルを読む場合や、書き出し失敗時にローカルへ落としたい場合は true
+			WriteLocalCopy = Config.Bind("Save", "WriteLocalCopy", false,
+				"シーン保存時にローカルへもファイルを作る（false=メモリから直接保存・KK_CardCompression 使用時は自動で true 相当）");
 
 			HarmonyInstance = new Harmony(GUID);
 			Patches.ApplyAll(HarmonyInstance);
@@ -1588,21 +1594,31 @@ namespace KK_SceneExplorer
 				{
 					return;
 				}
-				// メモリ保存（MemoryFileStream）の内容を実ファイルへ落とす。EndSceneSave は実ファイルへ追記するので必ず先。
-				// 通常は Dispose（Save の finally）で書き出し済み。ここは Dispose が飛んだ場合の保険（冪等）
+				// メモリ保存（MemoryFileStream）の内容を扱う。既定は実ファイルを作らず、メモリ上のバイト列を
+				// チャンク追記してそのまま最終保存先へ渡す（ディスク I/O は最終保存先への 1 回だけ）。
 				MemoryFileStream saved = MemoryFileStream.TakeLast();
+				byte[] scene = saved == null ? null : saved.Buffer.ToArray();
+				// ローカルにファイルを作る経路: 設定で明示された場合と、保存後に実ファイルを圧縮する KKCC が有効な場合
+				bool writeLocal = SceneExplorerPlugin.WriteLocalCopy.Value || SceneExplorerPlugin.kkccDetected;
 				if (saved != null)
 				{
-					if (!saved.Commit())
+					if (scene == null || scene.Length == 0)
+					{
+						MeTextureDedupe.AbortSceneSave();
+						TransferNotice.Show("シーンを保存できませんでした（メモリ上のデータが空）。\n" + Path.GetFileName(_path));
+						return;
+					}
+					if (writeLocal && !saved.Commit())
 					{
 						MeTextureDedupe.AbortSceneSave();
 						TransferNotice.Show("シーンを保存できませんでした（書き出しに失敗）。\n" + Path.GetFileName(_path));
 						return;
 					}
-					// 直後の Load がディスクを触らずに済むよう保持する（次の保存で置き換え、1 回読んだら捨てる）
-					MemoryReadStream.Cache(_path, saved.Buffer.ToArray());
 				}
-				// dedupe チャンクの追記は転送より先。追記に失敗したファイル（=マーカーのまま）は転送しない
+				byte[] transferData = null;
+				if (saved == null || writeLocal)
+				{
+					// 実ファイル経路（transpiler 未適用 / WriteLocalCopy / KKCC）
 				// （転送先のサイズ一致判定でローカル原本が消えるとテクスチャが全損する）
 				// DedupeEnabled で短絡してはいけない。パッチ登録は Awake 時に確定するので、
 				// ON→OFF に切り替えると SaveBundled がマーカーを書いたまま EndSceneSave が走らず、
@@ -1611,6 +1627,19 @@ namespace KK_SceneExplorer
 				{
 					TransferNotice.Show("このシーンのテクスチャは復元できません。再保存してください。\n" + Path.GetFileName(_path));
 					return;
+				}
+				}
+				else
+				{
+					// メモリ経路: 実ファイルを作らず、チャンク追記済みの完全なバイト列を転送層へ直渡しする
+					transferData = MeTextureDedupe.AppendChunkToBuffer(scene, _path);
+					if (transferData == null)
+					{
+						TransferNotice.Show("このシーンのテクスチャは復元できません。再保存してください。\n" + Path.GetFileName(_path));
+						return;
+					}
+					// 直後の Load がディスクを触らずに済むよう保持する（次の保存/読み込みで置き換わるだけ）
+					MemoryReadStream.Cache(_path, transferData);
 				}
 				// v2.5.3: 転送先の優先順は「直近で読み込んだシーンのフォルダ」→「SceneBrowser で最後に開いたフォルダ」→「最後にスキャンしたフォルダ」。
 				// シーン読み込み（LoadSceneCoroutine）で記録された読み込みフォルダを最優先にすることで、
@@ -1624,6 +1653,17 @@ namespace KK_SceneExplorer
 				if (string.IsNullOrEmpty(targetDir))
 				{
 					targetDir = SceneExplorerPlugin.lastSceneFolder;
+				}
+				if (transferData != null)
+				{
+					// メモリ経路: 転送対象フォルダが無ければ保存先自体が最終保存先（ローカル保存）
+					string finalPath = (!string.IsNullOrEmpty(targetDir) && ScenePaths.IsTransferTarget(targetDir))
+						? Path.Combine(targetDir, Path.GetFileName(_path))
+						: _path;
+					Log.LogInfo("保存: メモリ上のデータを最終保存先へ書き出します: " + finalPath);
+					byte[] data = transferData;
+					ThreadPool.QueueUserWorkItem(delegate { TransferBytes(data, finalPath); });
+					return;
 				}
 				if (string.IsNullOrEmpty(targetDir))
 				{
@@ -1862,6 +1902,65 @@ namespace KK_SceneExplorer
 			private static void TransferNow(string src, string dest)
 			{
 				lock (TransferGate) { TransferNowCore(src, dest); }
+			}
+
+			/// <summary>メモリ上のシーンを最終保存先へ 1 回だけ書く（ローカルにステージングしない）。
+			/// .part → FlushFileBuffers → サイズ一致 → 同一ディレクトリ内 Move の順はファイル版と同じ。
+			/// 失敗時はメモリ上のデータしか無いため、ファイル版と違ってローカル原本は残らない（通知で明示）。</summary>
+			private static void TransferBytes(byte[] data, string dest)
+			{
+				lock (TransferGate) { TransferBytesCore(data, dest); }
+			}
+
+			private static void TransferBytesCore(byte[] data, string dest)
+			{
+				string tmp = dest + "." + Guid.NewGuid().ToString("N") + ".part";
+				Exception lastError = null;
+				bool destRemoved = false;
+				try
+				{
+					for (int i = 0; i < TransferRetryAttempts; i++)
+					{
+						try
+						{
+							Directory.CreateDirectory(Path.GetDirectoryName(dest));
+							using (FileStream output = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+							{
+								output.Write(data, 0, data.Length);
+								output.Flush();
+#pragma warning disable 618 // net35 に FileStream.Flush(bool) は無い
+								if (!FlushFileBuffers(output.Handle)) throw new IOException("FlushFileBuffers に失敗しました: " + dest);
+#pragma warning restore 618
+							}
+							long actual = new FileInfo(tmp).Length;
+							if (actual != data.Length) throw new IOException("サイズ不一致: " + actual + " != " + data.Length);
+							if (File.Exists(dest)) { File.Delete(dest); destRemoved = true; }
+							File.Move(tmp, dest);
+							Log.LogInfo("シーンを書き出しました（メモリから）: " + dest);
+							return;
+						}
+						catch (IOException io) { lastError = io; }
+						catch (UnauthorizedAccessException ua) { lastError = ua; }
+						try { if (File.Exists(tmp)) File.Delete(tmp); } catch (Exception) { }
+						if (i < TransferRetryAttempts - 1)
+						{
+							Log.LogWarning("書き出しに失敗。リトライします (" + (i + 1) + "/" + TransferRetryAttempts + "): " + dest + (destRemoved ? "（旧版は削除済み）" : "") + " / " + lastError.Message);
+							Thread.Sleep(TransferRetryIntervalMs);
+						}
+					}
+					string lastReason = lastError == null ? "" : " 最後の失敗理由: " + lastError.Message;
+					Log.LogError("シーンを書き出せませんでした（メモリ上のデータなのでローカルには残りません）: " + dest + lastReason + (destRemoved ? "（旧版は削除済み）" : ""));
+					TransferNotice.Show("シーンを保存できませんでした。\n" + Path.GetFileName(dest) + lastReason + (destRemoved ? "（旧版は削除済み）" : ""));
+				}
+				catch (Exception ex)
+				{
+					Log.LogError("シーンを書き出せませんでした（メモリ上のデータなのでローカルには残りません）: " + ex);
+					TransferNotice.Show("シーンを保存できませんでした。\n" + Path.GetFileName(dest) + "\n" + ex.Message);
+				}
+				finally
+				{
+					try { if (File.Exists(tmp)) File.Delete(tmp); } catch (Exception) { }
+				}
 			}
 
 			/// <summary>ネットワークへ転送する。本文は一意な .part に書き、FlushFileBuffers（SMB2 FLUSH）でサーバー側の永続化を待ち、

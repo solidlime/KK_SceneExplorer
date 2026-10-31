@@ -49,23 +49,15 @@ namespace KK_SceneExplorer
 		public override void SetLength(long value) { inner.SetLength(value); }
 		public override void Flush() { inner.Flush(); }
 
-		/// <summary>Save の finally（output.Dispose）でメモリ内容を実ファイルへ書き出す。
-		/// postfix より先に走るので、後続の postfix（KK_CardCompression 等）からは従来どおりファイルが見える。</summary>
+		/// <summary>Dispose では書き出さない（ディスク I/O ゼロが目的）。ローカルコピーが要る経路だけ
+		/// postfix が明示的に Commit() を呼ぶ（設定 [Save] WriteLocalCopy / 転送先が無い場合）。</summary>
 		protected override void Dispose(bool disposing)
 		{
-			try
-			{
-				if (disposing) Commit();
-			}
-			catch (Exception ex)
-			{
-				Log.LogWarning("[SceneExplorer] メモリ保存の書き出しで例外: " + ex.Message);
-			}
 			base.Dispose(disposing);
 		}
 
-		/// <summary>メモリ上のシーンを本来のパスへ書き出す（冪等）。false = 書き出し失敗。
-		/// 失敗は Dispose（Save の finally）→ postfix の 2 回呼ばれうるので、結果を保持して同じ値を返す。</summary>
+		/// <summary>メモリ上のシーン（チャンク追記済み）を本来のパスへ書き出す。false = 失敗。
+		/// 呼ぶのはローカルコピーが必要なときだけ（postfix から明示的に）。</summary>
 		internal bool Commit()
 		{
 			if (commitAttempted) return !commitFailed;
@@ -100,7 +92,7 @@ namespace KK_SceneExplorer
 	/// <summary>メモリ上のシーンバイト列を読むための FileStream 派生（SceneInfo.Load の差し替え用）。</summary>
 	public sealed class MemoryReadStream : FileStream
 	{
-		// 保存直後のシーン（次回保存で置き換え、1 回読んだら捨てる）
+		// 直近に読み込んだ/保存したシーンのバイト列（パスが変われば置き換わるだけ）
 		private static readonly object cacheLock = new object();
 		private static string cachedPath;
 		private static byte[] cachedData;
@@ -115,7 +107,8 @@ namespace KK_SceneExplorer
 			inner = new MemoryStream(data, false);
 		}
 
-		/// <summary>シーン保存直後のバイト列を保持する。次の保存で置き換わる。</summary>
+		/// <summary>シーン保存直後の完成バイト列（チャンク追記済み）を保持する。次の保存で置き換わるだけで、
+		/// 読み出しでは消費しない（同じシーンを何度もロードしても毎回ディスクへ戻らない）。</summary>
 		internal static void Cache(string path, byte[] data)
 		{
 			lock (cacheLock)
@@ -125,21 +118,26 @@ namespace KK_SceneExplorer
 			}
 		}
 
-		/// <summary>SceneInfo.Load の FileStream 生成を置換する。保持しているシーンが無ければ本来のパスから開く。</summary>
-		public static FileStream Open(string path, FileMode mode, FileAccess access, FileShare share)
+		/// <summary>保持しているシーンバイト列を取り出す（消費しない）。</summary>
+		internal static bool TryGetCached(string path, out byte[] data)
 		{
-			byte[] data = null;
 			lock (cacheLock)
 			{
-				if (cachedData != null && string.Equals(cachedPath, path, StringComparison.OrdinalIgnoreCase))
+				if (cachedData != null && cachedPath != null && string.Equals(cachedPath, path, StringComparison.OrdinalIgnoreCase))
 				{
 					data = cachedData;
-					// 1 回使ったら参照を切る（バイト列はストリームが保持する）。メモリを抱え続けないため
-					cachedPath = null;
-					cachedData = null;
+					return true;
 				}
 			}
-			if (data == null)
+			data = null;
+			return false;
+		}
+
+		/// <summary>SceneInfo.Load の FileStream 生成を置換する。復元バッファがあればメモリから、無ければ本来のパスから開く。</summary>
+		public static FileStream Open(string path, FileMode mode, FileAccess access, FileShare share)
+		{
+			byte[] data;
+			if (!TryGetCached(path, out data))
 			{
 				return new FileStream(path, mode, access, share);
 			}
