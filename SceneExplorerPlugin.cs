@@ -1217,9 +1217,9 @@ namespace KK_SceneExplorer
 					}
 					harmony.Patch(sceneSave, transpiler: new HarmonyMethod(AccessTools.Method(typeof(Patches), nameof(SceneInfoSaveStreamTranspiler))));
 					harmony.Patch(sceneLoad, transpiler: new HarmonyMethod(AccessTools.Method(typeof(Patches), nameof(SceneInfoLoadStreamTranspiler))));
-					// ロード state（共有表・loadAttempted）の解放は自前で行う。ME の LoadBundled postfix に依存させると、
-					// ME データ無し / ME 未導入のシーンでガードが残ったままになる
-					harmony.Patch(sceneLoad, postfix: new HarmonyMethod(AccessTools.Method(typeof(Patches), nameof(SceneInfoLoadPostfix))) { priority = 900 });
+					// 共有表 loadedBlob の解放は SceneInfo.Load の postfix では行わない。LoadBundled（＝マーカー復元）は
+					// SceneInfo.Load の後に走るので、ここで捨てるとテクスチャが復元できなくなる。
+					// 解放は次の BeginSceneLoad（冒頭の loadedBlob = null）が担う。
 					Log.LogInfo("パッチ適用: メモリ I/O (SceneInfo.Save / SceneInfo.Load の FileStream 差し替え)");
 				}
 				catch (Exception ex)
@@ -1700,21 +1700,6 @@ namespace KK_SceneExplorer
 				{
 					// 同期転送すると転送 + FlushFileBuffers 待ちで数十秒〜数分 Studio が固まるため、プールへ逃がす
 					ThreadPool.QueueUserWorkItem(delegate { TransferNow(_path, dest); });
-				}
-			}
-
-			/// <summary>SceneInfo.Load postfix: ロード状態（共有表・prefix 二重実行ガード）を必ず解放する。
-			/// ME の LoadBundled が呼ばれないシーン（ME データ無し/ME 未導入）でもガードを残さないため、
-			/// ME 側の postfix に依存させずここで確実に行う。</summary>
-			private static void SceneInfoLoadPostfix()
-			{
-				try
-				{
-					MeTextureDedupe.EndSceneLoad();
-				}
-				catch (Exception ex)
-				{
-					Log.LogWarning("メモリ I/O: ロード状態の解放に失敗: " + ex.Message);
 				}
 			}
 

@@ -71,9 +71,8 @@ namespace KK_SceneExplorer
 
 		// 直近に読み込んだシーンの共有表。null = チャンク無し（バニラ）
 		private static Dictionary<long, byte[]> loadedBlob;
+		// ログ用（"どのシーンの話か"）。ロードの可否判定には使わない
 		private static string loadedPath;
-		// 同じパスの prefix 二重実行（Load(string) → Load(string, out Version)）を弾くための試行済みフラグ
-		private static bool loadAttempted;
 
 		/// <summary>PNG を WebP に変換する関数を差し込む。null で無効化（PNG のまま格納）。</summary>
 		internal static void SetWebPEncoder(Func<byte[], byte[]> encoder)
@@ -488,11 +487,8 @@ namespace KK_SceneExplorer
 		internal static void BeginSceneLoad(string path)
 		{
 			if (string.IsNullOrEmpty(path)) return;
-			// Load(string) は Load(string, out Version) を呼ぶだけなので、両方の prefix で
-			// 同じパスが 2 回来る。loadedBlob が null（バニラ）でも再走しないよう試行済みで弾く
-			if (loadAttempted && string.Equals(path, loadedPath, StringComparison.OrdinalIgnoreCase)) return;
-
-			loadAttempted = true;
+			// 毎回走る（同一パス 2 回目のためにガードを置かない）。同じパスを 2 回ロードしても
+			// 冒頭の Invalidate で古いバッファを捨て、ディスクの現在の内容から作り直す。
 			loadedBlob = null;
 			loadedPath = path;
 			if (!File.Exists(path)) return;
@@ -523,16 +519,6 @@ namespace KK_SceneExplorer
 			}
 		}
 
-		/// <summary>SceneInfo.Load(string, out Version) の postfix: ロード状態を必ず解放する。
-		/// ME の LoadBundled が呼ばれないシーン（ME データ無し/ME 未導入）でもガードが残らないようにするため、
-		/// 共有表の解放を ME 側の postfix に依存させない。</summary>
-		internal static void EndSceneLoad()
-		{
-			loadAttempted = false;
-			loadedPath = null;
-			loadedBlob = null;
-		}
-
 		/// <summary>シーン本体（チャンク手前まで）を読む。stream は先頭から読む前提。</summary>
 		private static byte[] ReadBody(Stream stream, long length)
 		{
@@ -543,7 +529,9 @@ namespace KK_SceneExplorer
 			return body;
 		}
 
-		/// <summary>LoadBundled postfix: マーカーを実データへ戻す。</summary>
+		/// <summary>LoadBundled postfix: マーカーを実データへ戻す。
+		/// 共有表 loadedBlob はここでは捨てない。LoadBundled は 1 回のロードで複数回呼ばれる（辞書ごと）ため、
+		/// 捨てるのは次の BeginSceneLoad（冒頭の loadedBlob = null）。</summary>
 		internal static void RestoreLoadedBlob(object result)
 		{
 			IDictionary dict = result as IDictionary;
@@ -554,16 +542,9 @@ namespace KK_SceneExplorer
 					// 事前検査は void しか弾かない。辞書以外が返る形に変わっていたら黙らず知らせる
 					Log.LogError("[SceneExplorer] ME texture dedupe: LoadBundled の戻り値が辞書でないためマーカーを展開できません: " + result.GetType().FullName);
 				}
-				loadedPath = null;
-				loadAttempted = false;
 				return;
 			}
-			if (dict.Count == 0)
-			{
-				loadedPath = null;
-				loadAttempted = false;
-				return;
-			}
+			if (dict.Count == 0) return;
 
 			int restored = 0;
 			int missing = 0;
@@ -613,8 +594,6 @@ namespace KK_SceneExplorer
 			{
 				Log.LogWarning("[SceneExplorer] ME texture dedupe: TextureContainer 型を解決できず展開できませんでした: " + loadedPath);
 			}
-			loadedPath = null;
-			loadAttempted = false;
 		}
 
 		/// <summary>末尾の dedupe チャンクを読む。headersOnly = データ本体を読まず hash と長さだけ（検証用）。
