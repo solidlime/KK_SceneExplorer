@@ -96,40 +96,60 @@ namespace KK_SceneExplorer
 		private static readonly object cacheLock = new object();
 		private static string cachedPath;
 		private static byte[] cachedData;
+		// GetBuffer が返す配列は容量 > 長さなので、有効長を別に保持する
+		private static int cachedLength;
 
 		private readonly MemoryStream inner;
 
 #pragma warning disable 618 // base のハンドルは読み書きに使わないので、実測で通った書き込み用 NUL ハンドルを共通で使う
-		public MemoryReadStream(byte[] data)
+		public MemoryReadStream(byte[] data, int length)
 			: base(NulDevice.Open(), FileAccess.Write)
 #pragma warning restore 618
 		{
-			inner = new MemoryStream(data, false);
+			inner = new MemoryStream(data, 0, length, false);
 		}
 
-		/// <summary>シーン保存直後の完成バイト列（チャンク追記済み）を保持する。次の保存で置き換わるだけで、
-		/// 読み出しでは消費しない（同じシーンを何度もロードしても毎回ディスクへ戻らない）。</summary>
-		internal static void Cache(string path, byte[] data)
+		/// <summary>シーンのバイト列（チャンク追記済み）を保持する。次の保存/読み込みで置き換わるだけで、
+		/// 読み出しでは消費しない（同じシーンを何度もロードしても毎回ディスクへ戻らない）。
+		/// buffer は GetBuffer の結果でもよい（length までを使う）。</summary>
+		internal static void Cache(string path, byte[] buffer, int length)
 		{
 			lock (cacheLock)
 			{
 				cachedPath = path;
-				cachedData = data;
+				cachedData = buffer;
+				cachedLength = length;
+			}
+		}
+
+		/// <summary>そのパスの古いバイト列を捨てる（ディスクから読み直す直前の無効化）。</summary>
+		internal static void Invalidate(string path)
+		{
+			lock (cacheLock)
+			{
+				if (cachedPath != null && string.Equals(cachedPath, path, StringComparison.OrdinalIgnoreCase))
+				{
+					cachedPath = null;
+					cachedData = null;
+					cachedLength = 0;
+				}
 			}
 		}
 
 		/// <summary>保持しているシーンバイト列を取り出す（消費しない）。</summary>
-		internal static bool TryGetCached(string path, out byte[] data)
+		internal static bool TryGetCached(string path, out byte[] data, out int length)
 		{
 			lock (cacheLock)
 			{
 				if (cachedData != null && cachedPath != null && string.Equals(cachedPath, path, StringComparison.OrdinalIgnoreCase))
 				{
 					data = cachedData;
+					length = cachedLength;
 					return true;
 				}
 			}
 			data = null;
+			length = 0;
 			return false;
 		}
 
@@ -137,12 +157,13 @@ namespace KK_SceneExplorer
 		public static FileStream Open(string path, FileMode mode, FileAccess access, FileShare share)
 		{
 			byte[] data;
-			if (!TryGetCached(path, out data))
+			int length;
+			if (!TryGetCached(path, out data, out length))
 			{
 				return new FileStream(path, mode, access, share);
 			}
-			SceneExplorerPlugin.Log.LogInfo("[SceneExplorer] シーン読み込みをメモリから実行: " + data.Length + " bytes / " + path);
-			return new MemoryReadStream(data);
+			SceneExplorerPlugin.Log.LogInfo("[SceneExplorer] シーン読み込みをメモリから実行: " + length + " bytes / " + path);
+			return new MemoryReadStream(data, length);
 		}
 
 		public override bool CanRead { get { return true; } }

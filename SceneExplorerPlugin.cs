@@ -1217,6 +1217,9 @@ namespace KK_SceneExplorer
 					}
 					harmony.Patch(sceneSave, transpiler: new HarmonyMethod(AccessTools.Method(typeof(Patches), nameof(SceneInfoSaveStreamTranspiler))));
 					harmony.Patch(sceneLoad, transpiler: new HarmonyMethod(AccessTools.Method(typeof(Patches), nameof(SceneInfoLoadStreamTranspiler))));
+					// ロード state（共有表・loadAttempted）の解放は自前で行う。ME の LoadBundled postfix に依存させると、
+					// ME データ無し / ME 未導入のシーンでガードが残ったままになる
+					harmony.Patch(sceneLoad, postfix: new HarmonyMethod(AccessTools.Method(typeof(Patches), nameof(SceneInfoLoadPostfix))) { priority = 900 });
 					Log.LogInfo("パッチ適用: メモリ I/O (SceneInfo.Save / SceneInfo.Load の FileStream 差し替え)");
 				}
 				catch (Exception ex)
@@ -1255,6 +1258,11 @@ namespace KK_SceneExplorer
 				else
 				{
 					SceneExplorerPlugin.Log.LogInfo("SceneInfo.Save Transpiler: FileStream を MemoryFileStream に置換しました（" + replaced + " 箇所）");
+					if (replaced > 1)
+					{
+						// MemoryFileStream.LastCreated は最後の 1 個しか保持しない。最初のストリームの内容は転送されない
+						SceneExplorerPlugin.Log.LogWarning("SceneInfo.Save Transpiler: FileStream 生成が " + replaced + " 箇所ありますが、メモリ保存で扱えるのは最後の 1 つだけです");
+					}
 				}
 			}
 
@@ -1597,12 +1605,16 @@ namespace KK_SceneExplorer
 				// メモリ保存（MemoryFileStream）の内容を扱う。既定は実ファイルを作らず、メモリ上のバイト列を
 				// チャンク追記してそのまま最終保存先へ渡す（ディスク I/O は最終保存先への 1 回だけ）。
 				MemoryFileStream saved = MemoryFileStream.TakeLast();
-				byte[] scene = saved == null ? null : saved.Buffer.ToArray();
-				// ローカルにファイルを作る経路: 設定で明示された場合と、保存後に実ファイルを圧縮する KKCC が有効な場合
-				bool writeLocal = SceneExplorerPlugin.WriteLocalCopy.Value || SceneExplorerPlugin.kkccDetected;
+				// ToArray しない（GetBuffer + Length で直接渡す。200MB 級のシーンでコピーを作らない）
+				byte[] scene = saved == null ? null : saved.Buffer.GetBuffer();
+				int sceneLength = saved == null ? 0 : (int)saved.Buffer.Length;
+				// ローカルにファイルを作る経路: 設定で明示された場合と、保存後に実ファイルを圧縮する KKCC が導入されている場合。
+				// KKCC は本プラグインより後にロードされうるので、起動時の判定結果だけに頼らず毎回見る
+				bool writeLocal = SceneExplorerPlugin.WriteLocalCopy.Value || SceneExplorerPlugin.kkccDetected
+					|| Type.GetType("KK_CardCompression.Plugin, KK_CardCompression") != null;
 				if (saved != null)
 				{
-					if (scene == null || scene.Length == 0)
+					if (sceneLength == 0)
 					{
 						MeTextureDedupe.AbortSceneSave();
 						TransferNotice.Show("シーンを保存できませんでした（メモリ上のデータが空）。\n" + Path.GetFileName(_path));
@@ -1616,30 +1628,32 @@ namespace KK_SceneExplorer
 					}
 				}
 				byte[] transferData = null;
+				int transferLength = 0;
 				if (saved == null || writeLocal)
 				{
-					// 実ファイル経路（transpiler 未適用 / WriteLocalCopy / KKCC）
-				// （転送先のサイズ一致判定でローカル原本が消えるとテクスチャが全損する）
-				// DedupeEnabled で短絡してはいけない。パッチ登録は Awake 時に確定するので、
-				// ON→OFF に切り替えると SaveBundled がマーカーを書いたまま EndSceneSave が走らず、
-				// 通知なしにテクスチャが全損する（始めたら必ず終える）。
-				if (!MeTextureDedupe.EndSceneSave(_path))
-				{
-					TransferNotice.Show("このシーンのテクスチャは復元できません。再保存してください。\n" + Path.GetFileName(_path));
-					return;
-				}
-				}
-				else
-				{
-					// メモリ経路: 実ファイルを作らず、チャンク追記済みの完全なバイト列を転送層へ直渡しする
-					transferData = MeTextureDedupe.AppendChunkToBuffer(scene, _path);
-					if (transferData == null)
+					// 実ファイル経路（transpiler 未適用 / WriteLocalCopy / KKCC）。転送先のサイズ一致判定で
+					// ローカル原本が消えるとテクスチャが全損するので、DedupeEnabled で短絡してはいけない。
+					// パッチ登録は Awake 時に確定するので、ON→OFF に切り替えると SaveBundled がマーカーを書いたまま
+					// EndSceneSave が走らず、通知なしにテクスチャが全損する（始めたら必ず終える）。
+					if (!MeTextureDedupe.EndSceneSave(_path))
 					{
 						TransferNotice.Show("このシーンのテクスチャは復元できません。再保存してください。\n" + Path.GetFileName(_path));
 						return;
 					}
+				}
+				else
+				{
+					// メモリ経路: 実ファイルを作らず、チャンク追記済みの完全なバイト列を転送層へ直渡しする
+					MemoryStream complete = MeTextureDedupe.AppendChunkToBuffer(scene, sceneLength, _path);
+					if (complete == null)
+					{
+						TransferNotice.Show("このシーンのテクスチャは復元できません。再保存してください。\n" + Path.GetFileName(_path));
+						return;
+					}
+					transferData = complete.GetBuffer();
+					transferLength = (int)complete.Length;
 					// 直後の Load がディスクを触らずに済むよう保持する（次の保存/読み込みで置き換わるだけ）
-					MemoryReadStream.Cache(_path, transferData);
+					MemoryReadStream.Cache(_path, transferData, transferLength);
 				}
 				// v2.5.3: 転送先の優先順は「直近で読み込んだシーンのフォルダ」→「SceneBrowser で最後に開いたフォルダ」→「最後にスキャンしたフォルダ」。
 				// シーン読み込み（LoadSceneCoroutine）で記録された読み込みフォルダを最優先にすることで、
@@ -1662,7 +1676,8 @@ namespace KK_SceneExplorer
 						: _path;
 					Log.LogInfo("保存: メモリ上のデータを最終保存先へ書き出します: " + finalPath);
 					byte[] data = transferData;
-					ThreadPool.QueueUserWorkItem(delegate { TransferBytes(data, finalPath); });
+					int length = transferLength;
+					ThreadPool.QueueUserWorkItem(delegate { TransferBytes(data, length, finalPath); });
 					return;
 				}
 				if (string.IsNullOrEmpty(targetDir))
@@ -1685,6 +1700,21 @@ namespace KK_SceneExplorer
 				{
 					// 同期転送すると転送 + FlushFileBuffers 待ちで数十秒〜数分 Studio が固まるため、プールへ逃がす
 					ThreadPool.QueueUserWorkItem(delegate { TransferNow(_path, dest); });
+				}
+			}
+
+			/// <summary>SceneInfo.Load postfix: ロード状態（共有表・prefix 二重実行ガード）を必ず解放する。
+			/// ME の LoadBundled が呼ばれないシーン（ME データ無し/ME 未導入）でもガードを残さないため、
+			/// ME 側の postfix に依存させずここで確実に行う。</summary>
+			private static void SceneInfoLoadPostfix()
+			{
+				try
+				{
+					MeTextureDedupe.EndSceneLoad();
+				}
+				catch (Exception ex)
+				{
+					Log.LogWarning("メモリ I/O: ロード状態の解放に失敗: " + ex.Message);
 				}
 			}
 
@@ -1907,16 +1937,18 @@ namespace KK_SceneExplorer
 			/// <summary>メモリ上のシーンを最終保存先へ 1 回だけ書く（ローカルにステージングしない）。
 			/// .part → FlushFileBuffers → サイズ一致 → 同一ディレクトリ内 Move の順はファイル版と同じ。
 			/// 失敗時はメモリ上のデータしか無いため、ファイル版と違ってローカル原本は残らない（通知で明示）。</summary>
-			private static void TransferBytes(byte[] data, string dest)
+			private static void TransferBytes(byte[] data, int length, string dest)
 			{
-				lock (TransferGate) { TransferBytesCore(data, dest); }
+				lock (TransferGate) { TransferBytesCore(data, length, dest); }
 			}
 
-			private static void TransferBytesCore(byte[] data, string dest)
+			private static void TransferBytesCore(byte[] data, int length, string dest)
 			{
 				string tmp = dest + "." + Guid.NewGuid().ToString("N") + ".part";
+				// 旧版は dest.bak へ退避してから公開する（公開に失敗したら戻す）。
+				// メモリ完結保存にはローカル原本が無いので、ここで旧版を失うとシーンがどこにも無くなる
+				string bak = dest + ".bak";
 				Exception lastError = null;
-				bool destRemoved = false;
 				try
 				{
 					for (int i = 0; i < TransferRetryAttempts; i++)
@@ -1924,18 +1956,39 @@ namespace KK_SceneExplorer
 						try
 						{
 							Directory.CreateDirectory(Path.GetDirectoryName(dest));
+							// 前回の試行で dest を .bak へ退避したままなら先に戻す（常に dest に旧版がある状態から始める）
+							if (!File.Exists(dest) && File.Exists(bak)) File.Move(bak, dest);
 							using (FileStream output = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
 							{
-								output.Write(data, 0, data.Length);
+								output.Write(data, 0, length);
 								output.Flush();
 #pragma warning disable 618 // net35 に FileStream.Flush(bool) は無い
 								if (!FlushFileBuffers(output.Handle)) throw new IOException("FlushFileBuffers に失敗しました: " + dest);
 #pragma warning restore 618
 							}
 							long actual = new FileInfo(tmp).Length;
-							if (actual != data.Length) throw new IOException("サイズ不一致: " + actual + " != " + data.Length);
-							if (File.Exists(dest)) { File.Delete(dest); destRemoved = true; }
-							File.Move(tmp, dest);
+							if (actual != length) throw new IOException("サイズ不一致: " + actual + " != " + length);
+							bool backedUp = false;
+							if (File.Exists(dest))
+							{
+								if (File.Exists(bak)) File.Delete(bak);
+								File.Move(dest, bak);
+								backedUp = true;
+							}
+							try
+							{
+								File.Move(tmp, dest);
+							}
+							catch (Exception)
+							{
+								// 公開に失敗したら旧版を戻す（シーンを失わないことを優先する）
+								if (backedUp && !File.Exists(dest))
+								{
+									try { File.Move(bak, dest); } catch (Exception restoreEx) { Log.LogError("旧版を戻せませんでした（" + bak + " に退避されています）: " + restoreEx.Message); }
+								}
+								throw;
+							}
+							if (backedUp) { try { File.Delete(bak); } catch (Exception) { } }
 							Log.LogInfo("シーンを書き出しました（メモリから）: " + dest);
 							return;
 						}
@@ -1944,13 +1997,13 @@ namespace KK_SceneExplorer
 						try { if (File.Exists(tmp)) File.Delete(tmp); } catch (Exception) { }
 						if (i < TransferRetryAttempts - 1)
 						{
-							Log.LogWarning("書き出しに失敗。リトライします (" + (i + 1) + "/" + TransferRetryAttempts + "): " + dest + (destRemoved ? "（旧版は削除済み）" : "") + " / " + lastError.Message);
+							Log.LogWarning("書き出しに失敗。リトライします (" + (i + 1) + "/" + TransferRetryAttempts + "): " + dest + " / " + lastError.Message);
 							Thread.Sleep(TransferRetryIntervalMs);
 						}
 					}
 					string lastReason = lastError == null ? "" : " 最後の失敗理由: " + lastError.Message;
-					Log.LogError("シーンを書き出せませんでした（メモリ上のデータなのでローカルには残りません）: " + dest + lastReason + (destRemoved ? "（旧版は削除済み）" : ""));
-					TransferNotice.Show("シーンを保存できませんでした。\n" + Path.GetFileName(dest) + lastReason + (destRemoved ? "（旧版は削除済み）" : ""));
+					Log.LogError("シーンを書き出せませんでした（旧版は残しています。メモリ上のデータは失われました）: " + dest + lastReason);
+					TransferNotice.Show("シーンを保存できませんでした（旧版は残っています）。\n" + Path.GetFileName(dest) + lastReason);
 				}
 				catch (Exception ex)
 				{

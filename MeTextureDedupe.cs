@@ -343,27 +343,34 @@ namespace KK_SceneExplorer
 			}
 		}
 
-		/// <summary>WriteLocalCopy=false 用: メモリ上のシーン本体にチャンクを追記した完全なバイト列を返す。null = 失敗。</summary>
-		internal static byte[] AppendChunkToBuffer(byte[] body, string path)
+		/// <summary>WriteLocalCopy=false 用: メモリ上のシーン本体にチャンクを追記したストリームを返す。null = 失敗。
+		/// bodyLength までを本体として使い（GetBuffer + Length でもよい）、ToArray のコピーを作らない。</summary>
+		internal static MemoryStream AppendChunkToBuffer(byte[] body, int bodyLength, string path)
 		{
 			savingDepth = 0;
 			try
 			{
-				if (body == null) return null;
+				if (body == null || bodyLength <= 0) return null;
 				if (pendingBlob.Count == 0)
 				{
 					Log.LogInfo("[SceneExplorer] ME texture dedupe: 対象テクスチャ無し（チャンク不要 = バニラ）");
-					return body;
+					MemoryStream plain = new MemoryStream(bodyLength);
+					plain.Write(body, 0, bodyLength);
+					return plain;
 				}
-				using (MemoryStream ms = new MemoryStream(body.Length + 1048576))
+				long total = bodyLength + ChunkTotalSize();
+				if (total > int.MaxValue)
 				{
-					ms.Write(body, 0, body.Length);
-					if (!WriteChunk(ms, path)) return null;
-					byte[] full = ms.ToArray();
-					// 追記結果をメモリ上で検証（ファイル版と同じ検査）
-					if (!VerifyChunkCore(new MemoryStream(full, false), path)) return null;
-					return full;
+					Log.LogError("[SceneExplorer] ME texture dedupe: シーン + チャンクが 2GiB を超えるため中止（このシーンのテクスチャは復元できません）: " + path);
+					return null;
 				}
+				// 必要長を先に確保する（倍々成長の再確保を挟まない）
+				MemoryStream ms = new MemoryStream((int)total);
+				ms.Write(body, 0, bodyLength);
+				if (!WriteChunk(ms, path)) return null;
+				// 追記結果をメモリ上で検証（ファイル版と同じ検査）
+				if (!VerifyChunkCore(new MemoryStream(ms.GetBuffer(), 0, (int)ms.Length, false), path)) return null;
+				return ms;
 			}
 			catch (Exception ex)
 			{
@@ -376,20 +383,27 @@ namespace KK_SceneExplorer
 			}
 		}
 
-		/// <summary>チャンク本体（ヘッダ + 全エントリ + フッタ）を output の現在位置へ書く。</summary>
-		private static bool WriteChunk(Stream output, string path)
+		/// <summary>チャンク全体（ヘッダ + 全エントリ + フッタ）の長さ。</summary>
+		private static long ChunkTotalSize()
 		{
 			long uniqueBytes = 0;
 			foreach (KeyValuePair<long, byte[]> kv in pendingBlob)
 			{
 				uniqueBytes += kv.Value.Length;
 			}
-			long chunkSize = ChunkHeaderSize + ChunkFooterSize + uniqueBytes + (long)pendingBlob.Count * EntryHeaderSize;
+			return ChunkHeaderSize + ChunkFooterSize + uniqueBytes + (long)pendingBlob.Count * EntryHeaderSize;
+		}
+
+		/// <summary>チャンク本体（ヘッダ + 全エントリ + フッタ）を output の現在位置へ書く。</summary>
+		private static bool WriteChunk(Stream output, string path)
+		{
+			long chunkSize = ChunkTotalSize();
 			if (chunkSize > uint.MaxValue)
 			{
 				Log.LogError("[SceneExplorer] ME texture dedupe: チャンクが " + FormatBytes(chunkSize) + " で 4GiB を超えるため中止（このシーンのテクスチャは復元できません）: " + path);
 				return false;
 			}
+			long uniqueBytes = chunkSize - ChunkHeaderSize - ChunkFooterSize - (long)pendingBlob.Count * EntryHeaderSize;
 
 			long rawBytes = 0;
 			long start = output.Position;
@@ -483,6 +497,10 @@ namespace KK_SceneExplorer
 			loadedPath = path;
 			if (!File.Exists(path)) return;
 
+			// これからディスクから読み直すので、そのパスの古いキャッシュは先に捨てる
+			// （チャンク無し/読取失敗のときに保存前の body を掴まないため。成功時のみ再キャッシュする）
+			MemoryReadStream.Invalidate(path);
+
 			try
 			{
 				using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
@@ -493,7 +511,7 @@ namespace KK_SceneExplorer
 					loadedBlob = table;
 					// シーン本体（チャンク手前まで）もここで読む。開いたまま読むのでディスクは 1 回だけ
 					byte[] body = ReadBody(stream, bodyLength);
-					if (body != null) MemoryReadStream.Cache(path, body);
+					if (body != null) MemoryReadStream.Cache(path, body, body.Length);
 					QueueConvert(table);
 					Log.LogInfo("[SceneExplorer] ME texture dedupe チャンク検出: " + table.Count + " 枚を展開: " + path);
 				}
@@ -503,6 +521,16 @@ namespace KK_SceneExplorer
 				loadedBlob = null;
 				Log.LogWarning("[SceneExplorer] ME texture dedupe: チャンク読取失敗（バニラとして読み込みます）: " + ex.Message);
 			}
+		}
+
+		/// <summary>SceneInfo.Load(string, out Version) の postfix: ロード状態を必ず解放する。
+		/// ME の LoadBundled が呼ばれないシーン（ME データ無し/ME 未導入）でもガードが残らないようにするため、
+		/// 共有表の解放を ME 側の postfix に依存させない。</summary>
+		internal static void EndSceneLoad()
+		{
+			loadAttempted = false;
+			loadedPath = null;
+			loadedBlob = null;
 		}
 
 		/// <summary>シーン本体（チャンク手前まで）を読む。stream は先頭から読む前提。</summary>
