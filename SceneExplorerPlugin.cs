@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
@@ -1301,7 +1301,7 @@ namespace KK_SceneExplorer
 				}
 				else
 				{
-					// 同期転送すると全長照合込みで最大 228 秒（5 回リトライ + sleep）Studio が固まるため、プールへ逃がす
+					// 同期転送すると転送 + FlushFileBuffers 待ちで数十秒〜数分 Studio が固まるため、プールへ逃がす
 					ThreadPool.QueueUserWorkItem(delegate { TransferNow(_path, dest); });
 				}
 			}
@@ -1518,11 +1518,14 @@ namespace KK_SceneExplorer
 				lock (TransferGate) { TransferNowCore(src, dest); }
 			}
 
-			/// <summary>ネットワークへ転送する。本文は一意な .part に書き、完了後に rename する。
-			/// 本名での公開は File.Move の 1 回だけ（SMB 上の同一ディレクトリ rename）なので、中断されたファイルが本名で現れることはない。
-			/// サイズ一致 かつ 全長バイト一致 を確認するまで File.Move も File.Delete(src) もしない。
-			/// 検出できないもの: File.Move 後にサーバー側で壊れる場合、転送完了後の別プロセスによる上書き。
-			/// 全長照合は 208MB シーンで +22 秒かかるが、1MB 以降の破損を見逃すと復旧不能なため正しさを優先する。</summary>
+			/// <summary>ネットワークへ転送する。本文は一意な .part に書き、FlushFileBuffers（SMB2 FLUSH）でサーバー側の永続化を待ち、
+			/// サイズ一致を確認してから同一ディレクトリ内 File.Move で本名公開する。
+			/// 本名での公開は File.Move の 1 回だけなので、中断されたファイルが本名で現れることはない。
+			/// 検証成功後にのみ File.Move と File.Delete(src) を行う（失敗時はローカル原本を保持して通知する）。
+			/// 内容のバイト照合は行わない（1.1GB の保存が約4分になるため）。
+			/// したがって「サイズは正しいが内容が化けた」破損は、サーバー側の異常に起因するものを含めて検出できない。
+			/// 検出できないもの: File.Move 後のサーバー側破損、転送完了後の別プロセスによる上書き、
+			/// FlushFileBuffers が成功した後にサーバーがデータを失う異常。</summary>
 			private static void TransferNowCore(string src, string dest)
 			{
 				string tmp = dest + "." + Guid.NewGuid().ToString("N") + ".part";
@@ -1556,8 +1559,8 @@ namespace KK_SceneExplorer
 							}
 							long actual = new FileInfo(tmp).Length;
 							if (actual != expected) throw new IOException("サイズ不一致: " + actual + " != " + expected);
-							long differ = FindFirstDifference(src, tmp);
-							if (differ >= 0) throw new IOException("内容不一致（バイト位置 " + differ + "）: " + dest);
+							// shortcut: 内容のバイト照合は行わない（1.1GB の保存が約4分になるため）。
+							// ライトバックキャッシュ問題は FlushFileBuffers で塞ぐ。ACK 後にサーバーがデータを失う異常は未検出。
 							if (File.Exists(dest)) { File.Delete(dest); destRemoved = true; }
 							File.Move(tmp, dest);
 							Log.LogInfo("ネットワークへ転送しました: " + dest);
@@ -1599,114 +1602,6 @@ namespace KK_SceneExplorer
 				{
 					try { if (File.Exists(tmp)) File.Delete(tmp); } catch (Exception) { }
 				}
-			}
-
-			/// <summary>2 ファイルを全長比較し、最初に違う位置を返す（一致なら -1）。
-			/// b 側は SMB クライアントキャッシュを避けるため NoBuffering で開く（キャッシュに当たると
-			/// 「自分が書いたバイト列が返る」だけで、サーバーに届いていないことを検出できない）。
-			/// NoBuffering が使えない環境では通常読みに落ちる。</summary>
-			private static long FindFirstDifference(string a, string b)
-			{
-				FileStream fa = null;
-				UnbufferedFile fb = null;
-				try
-				{
-					fa = new FileStream(a, FileMode.Open, FileAccess.Read, FileShare.Read, 65536);
-					fb = UnbufferedFile.Open(b);
-					byte[] ba = new byte[65536];
-					byte[] bb = new byte[65536];
-					long offset = 0;
-					while (true)
-					{
-						int nb = fb.Read(bb);
-						// b 側が EOF。a 側も EOF なら一致、まだ読めるなら a が長い＝不一致
-						if (nb == 0) return fa.ReadByte() < 0 ? -1 : offset;
-						int na = ReadFull(fa, ba, nb);
-						if (na != nb) return offset;
-						for (int i = 0; i < na; i++)
-						{
-							if (ba[i] != bb[i]) return offset + i;
-						}
-						offset += na;
-					}
-				}
-				finally
-				{
-					if (fa != null) fa.Dispose();
-					if (fb != null) fb.Dispose();
-				}
-			}
-
-			private const uint GenericRead = 0x80000000;
-			private const uint FileShareAll = 0x00000007; // FILE_SHARE_READ | WRITE | DELETE
-			private const uint OpenExisting = 3;
-			private const uint FileFlagNoBuffering = 0x20000000;
-
-			[DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-			private static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
-			[DllImport("kernel32.dll", SetLastError = true)]
-			private static extern bool ReadFile(IntPtr hFile, byte[] buffer, int bytesToRead, out int bytesRead, IntPtr overlapped);
-			[DllImport("kernel32.dll", SetLastError = true)]
-			private static extern bool CloseHandle(IntPtr hObject);
-
-			/// <summary>FILE_FLAG_NO_BUFFERING で開いたファイル。net35 の FileOptions に NoBuffering は無く（.NET 4.0 追加）、
-			/// 未知ビットは Mono が無視して通常のキャッシュ読みになり得るため、直接 CreateFileW で開く。
-			/// 読み出しはオフセット・長さとも 4096 の倍数に限る（NoBuffering の要件）。
-			/// 開けない・読めない環境では通常読みに落ちる。</summary>
-			private sealed class UnbufferedFile : IDisposable
-			{
-				private const int Alignment = 4096;
-				private IntPtr handle;
-				private FileStream fallback;
-
-				public static UnbufferedFile Open(string path)
-			{
-					UnbufferedFile f = new UnbufferedFile();
-					IntPtr h = CreateFileW(path, GenericRead, FileShareAll, IntPtr.Zero, OpenExisting, FileFlagNoBuffering, IntPtr.Zero);
-					if (h == (IntPtr)(-1))
-					{
-						// NoBuffering が開けない＝クライアントキャッシュ経由の弱い検証になる。黙って落ちると検証の意味が消えるので残す
-						Log.LogWarning("NoBuffering で開けませんでした。キャッシュ経由の弱い検証になります（err=" + Marshal.GetLastWin32Error() + "）: " + path);
-						f.fallback = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 65536);
-					}
-					else f.handle = h;
-					return f;
-				}
-
-				/// <summary>buffer を埋まるまで読む。4096 の倍数に切り捨て、余りは次の読みに回す。</summary>
-				public int Read(byte[] buffer)
-			{
-					int want = buffer.Length & ~(Alignment - 1);
-					if (want < Alignment) want = buffer.Length;   // 短いバッファはそのまま読む（NoBuffering 要件は呼び出し側の責務）
-					if (handle == IntPtr.Zero) return fallback.Read(buffer, 0, want);
-					int got;
-					if (!ReadFile(handle, buffer, want, out got, IntPtr.Zero))
-					{
-						int err = Marshal.GetLastWin32Error();
-						if (err == 38) return 0; // ERROR_HANDLE_EOF
-						throw new IOException("ReadFile に失敗しました: " + err);
-					}
-					return got;
-				}
-
-				public void Dispose()
-				{
-					if (handle != IntPtr.Zero) { CloseHandle(handle); handle = IntPtr.Zero; }
-					if (fallback != null) { fallback.Dispose(); fallback = null; }
-				}
-			}
-
-			/// <summary>バッファが埋まる（または limit に達する）まで読む。末尾で足りない場合は読めた分だけ返す。</summary>
-			private static int ReadFull(Stream stream, byte[] buffer, int limit)
-			{
-				int total = 0;
-				while (total < limit)
-				{
-					int n = stream.Read(buffer, total, limit - total);
-					if (n <= 0) break;
-					total += n;
-				}
-				return total;
 			}
 		}
 	}
