@@ -52,6 +52,11 @@
     </Reference>
   </ItemGroup>
 
+  <!-- _research 配下は開発用スクリプト（単体で csc する）。ビルド対象から外す -->
+  <ItemGroup>
+    <Compile Remove="_research/**/*.cs" />
+  </ItemGroup>
+
   <!-- net35（KK）用リファレンスアセンブリ -->
   <ItemGroup Condition="'$(Game)' != 'KKS'">
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net35" Version="1.0.3" PrivateAssets="all" />

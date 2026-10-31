@@ -58,6 +58,8 @@ namespace KK_SceneExplorer
 		internal static ConfigEntry<int> SortMode;
 		internal static ConfigEntry<bool> SortDescending;
 		internal static ConfigEntry<string> LastFolder;
+		/// <summary>ME テクスチャ dedupe の有効化（既定 OFF。ON にしたシーンはプラグイン無しで復元不可）</summary>
+		public static ConfigEntry<bool> DedupeEnabled;
 
 		internal static string lastSceneFolder;
 		internal static string lastLoadedFolder;
@@ -571,6 +573,9 @@ namespace KK_SceneExplorer
 			SortMode = Config.Bind("General", "SortMode", 1, "ファイルソート基準（0=名前, 1=日時, 2=サイズ）");
 			SortDescending = Config.Bind("General", "SortDescending", true, "ファイルソート降順");
 			LastFolder = Config.Bind("General", "LastFolder", "", "最後に開いたシーンフォルダ（空=ローカルルート）");
+			// 実機での往復検証が済むまで既定 OFF。ON にしたシーンは本プラグイン無しではテクスチャが復元できない
+			DedupeEnabled = Config.Bind("Dedupe", "Enabled", false,
+				"MaterialEditor テクスチャのシーン横断 dedupe を有効にする（既定 OFF）");
 
 			HarmonyInstance = new Harmony(GUID);
 			Patches.ApplyAll(HarmonyInstance);
@@ -649,6 +654,7 @@ namespace KK_SceneExplorer
 
 		private void Update()
 		{
+			MeTextureDedupe.Tick(UnityEngine.Time.frameCount);
 			if (IsMainGame)
 			{
 				// v3.4.0: メインゲーム（キャラエディタ）ではスタジオのシーン一覧UIが存在しないため、
@@ -1174,6 +1180,105 @@ namespace KK_SceneExplorer
 					harmony.Patch(t9, prefix: new HarmonyMethod(AccessTools.Method(typeof(Patches), nameof(MPCharCtrlOnClickRootPrefix))));
 					Log.LogInfo("パッチ適用: Studio.MPCharCtrl.OnClickRoot");
 				}
+
+				if (SceneExplorerPlugin.DedupeEnabled.Value)
+				{
+					ApplyMeTextureDedupe(harmony);
+				}
+				else
+				{
+					Log.LogInfo("ME texture dedupe: 設定で無効（既定 OFF）");
+				}
+			}
+
+			/// <summary>ME テクスチャのシーン横断 dedupe。ME 未導入・シグネチャ相違・パッチ失敗なら dedupe だけを無効化する。</summary>
+			private static void ApplyMeTextureDedupe(Harmony harmony)
+			{
+				try
+				{
+					Type saveHandler = AccessTools.TypeByName("KK_Plugins.MaterialEditor.TextureSaveHandler");
+					if (saveHandler == null)
+					{
+						Log.LogInfo("ME texture dedupe: MaterialEditor 未検出のため無効");
+						return;
+					}
+					MethodInfo meSave = AccessTools.Method(saveHandler, "SaveBundled");
+					MethodInfo meLoad = AccessTools.Method(saveHandler, "LoadBundled");
+					if (meSave == null || meLoad == null)
+					{
+						Log.LogWarning("ME texture dedupe: TextureSaveHandler.SaveBundled/LoadBundled が見つからず無効");
+						return;
+					}
+
+					// __2 / __result の位置バインドは相違しても無言 no-op になるため、先に明示検査する
+					ParameterInfo[] saveParams = meSave.GetParameters();
+					if (saveParams.Length < 3 || !IsDictionaryCompatible(saveParams[2].ParameterType))
+					{
+						Log.LogWarning("ME texture dedupe: SaveBundled の第3引数が辞書でない（想定外）ため無効");
+						return;
+					}
+					if (meLoad.ReturnType == typeof(void))
+					{
+						Log.LogWarning("ME texture dedupe: LoadBundled が値を返さない（想定外）ため無効");
+						return;
+					}
+
+					harmony.Patch(meSave,
+						prefix: new HarmonyMethod(AccessTools.Method(typeof(Patches), nameof(MeTextureSavePrefix))),
+						finalizer: new HarmonyMethod(AccessTools.Method(typeof(Patches), nameof(MeTextureSaveFinalizer))));
+					harmony.Patch(meLoad, postfix: new HarmonyMethod(AccessTools.Method(typeof(Patches), nameof(MeTextureLoadPostfix))));
+
+					// チャンク追記は SceneInfoSavePostfix 内で転送キューの前に実行する（postfix の実行順に依存しない）
+					MethodInfo sceneSave = AccessTools.Method(typeof(Studio.SceneInfo), "Save", new Type[] { typeof(string) });
+					if (sceneSave != null)
+					{
+						harmony.Patch(sceneSave, prefix: new HarmonyMethod(AccessTools.Method(typeof(Patches), nameof(SceneInfoSaveDedupePrefix))));
+					}
+
+					// Load(string) は Load(string, out Version) を呼ぶだけ。両方フックしても BeginSceneLoad 側で冪等
+					HarmonyMethod loadPrefix = new HarmonyMethod(AccessTools.Method(typeof(Patches), nameof(SceneInfoLoadPrefix)));
+					MethodInfo loadSimple = AccessTools.Method(typeof(Studio.SceneInfo), "Load", new Type[] { typeof(string) });
+					if (loadSimple != null) harmony.Patch(loadSimple, prefix: loadPrefix);
+					MethodInfo loadVersion = AccessTools.Method(typeof(Studio.SceneInfo), "Load",
+						new Type[] { typeof(string), typeof(Version).MakeByRefType() });
+					if (loadVersion != null) harmony.Patch(loadVersion, prefix: loadPrefix);
+					Log.LogInfo("パッチ適用: ME texture dedupe (TextureSaveHandler / SceneInfo.Save / SceneInfo.Load)");
+				}
+				catch (Exception ex)
+				{
+					// ここで落ちても既存機能（ブラウザ/設定UI/転送）は生き残らせる
+					Log.LogWarning("ME texture dedupe: パッチ適用に失敗したため dedupe のみ無効化: " + ex);
+				}
+			}
+
+			private static bool IsDictionaryCompatible(Type type)
+			{
+				return type == typeof(object) || typeof(System.Collections.IDictionary).IsAssignableFrom(type);
+			}
+
+			private static void SceneInfoSaveDedupePrefix()
+			{
+				MeTextureDedupe.BeginSceneSave(UnityEngine.Time.frameCount);
+			}
+
+			private static void SceneInfoLoadPrefix(string _path)
+			{
+				MeTextureDedupe.BeginSceneLoad(_path);
+			}
+
+			private static List<object[]> MeTextureSavePrefix(object __2)
+			{
+				return MeTextureDedupe.SwapToMarkers(__2);
+			}
+
+			private static void MeTextureSaveFinalizer(List<object[]> __state)
+			{
+				MeTextureDedupe.RestoreMarkers(__state);
+			}
+
+			private static void MeTextureLoadPostfix(object __result)
+			{
+				MeTextureDedupe.RestoreLoadedBlob(__result);
 			}
 
 			private static IEnumerable<CodeInstruction> InitInfoTranspiler(IEnumerable<CodeInstruction> instructions)
@@ -1270,6 +1375,16 @@ namespace KK_SceneExplorer
 				{
 					return;
 				}
+				// dedupe チャンクの追記は転送より先。追記に失敗したファイル（=マーカーのまま）は転送しない
+				// （転送先のサイズ一致判定でローカル原本が消えるとテクスチャが全損する）
+				// DedupeEnabled で短絡してはいけない。パッチ登録は Awake 時に確定するので、
+				// ON→OFF に切り替えると SaveBundled がマーカーを書いたまま EndSceneSave が走らず、
+				// 通知なしにテクスチャが全損する（始めたら必ず終える）。
+				if (!MeTextureDedupe.EndSceneSave(_path))
+				{
+					TransferNotice.Show("このシーンのテクスチャは復元できません。再保存してください。\n" + Path.GetFileName(_path));
+					return;
+				}
 				// v2.5.3: 転送先の優先順は「直近で読み込んだシーンのフォルダ」→「SceneBrowser で最後に開いたフォルダ」→「最後にスキャンしたフォルダ」。
 				// シーン読み込み（LoadSceneCoroutine）で記録された読み込みフォルダを最優先にすることで、
 				// RescanFiles/GetAllSceneFiles による lastSceneFolder のローカルルート上書きの影響を受けず、
@@ -1316,6 +1431,8 @@ namespace KK_SceneExplorer
 					return;
 				}
 				Log.LogError("シーンの保存に失敗しました: " + _path + " | " + __exception);
+				// dedupe のゲートを戻す（postfix が飛んでも次回のカード保存を巻き込まない）
+				MeTextureDedupe.AbortSceneSave();
 			}
 
 			// v3.1.0: CharaList のインスタンスを保持（Awake はスタジオ起動時に一度だけ呼ばれる。女/男タブは別インスタンスのためリストで保持）

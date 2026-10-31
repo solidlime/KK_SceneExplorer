@@ -10,3 +10,9 @@ obj/
 # IDE
 .idea/
 *.swp
+
+# ローカル調査・作業用（コミットしない）
+.codegraph/
+.agents/
+_research/
+inspect.ps1
