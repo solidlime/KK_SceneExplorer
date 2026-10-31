@@ -573,9 +573,9 @@ namespace KK_SceneExplorer
 			SortMode = Config.Bind("General", "SortMode", 1, "ファイルソート基準（0=名前, 1=日時, 2=サイズ）");
 			SortDescending = Config.Bind("General", "SortDescending", true, "ファイルソート降順");
 			LastFolder = Config.Bind("General", "LastFolder", "", "最後に開いたシーンフォルダ（空=ローカルルート）");
-			// 実機での往復検証が済むまで既定 OFF。ON にしたシーンは本プラグイン無しではテクスチャが復元できない
-			DedupeEnabled = Config.Bind("Dedupe", "Enabled", false,
-				"MaterialEditor テクスチャのシーン横断 dedupe を有効にする（既定 OFF）");
+			// 実機で保存→ロード往復を確認済み（1.1GB → 209MB）。変更は次回起動から効く（Awake でパッチを張るため）
+			DedupeEnabled = Config.Bind("Dedupe", "Enabled", true,
+				"MaterialEditor テクスチャのシーン横断 dedupe を有効にする（変更は再起動後）");
 
 			HarmonyInstance = new Harmony(GUID);
 			Patches.ApplyAll(HarmonyInstance);
@@ -1266,11 +1266,13 @@ namespace KK_SceneExplorer
 				MeTextureDedupe.BeginSceneLoad(_path);
 			}
 
-			private static List<object[]> MeTextureSavePrefix(object __2)
+			// Harmony の prefix は bool/void しか返せない。辞書そのものを書き換える。
+			private static void MeTextureSavePrefix(object __2, out List<object[]> __state)
 			{
-				return MeTextureDedupe.SwapToMarkers(__2);
+				__state = MeTextureDedupe.SwapToMarkers(__2);
 			}
 
+			// 例外でも必ず走る。差し替えた token を元に戻す（savingDepth は EndSceneSave が戻す）。
 			private static void MeTextureSaveFinalizer(List<object[]> __state)
 			{
 				MeTextureDedupe.RestoreMarkers(__state);

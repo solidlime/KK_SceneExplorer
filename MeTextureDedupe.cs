@@ -82,7 +82,9 @@ namespace KK_SceneExplorer
 			pendingBlob.Clear();
 		}
 
-		/// <summary>SaveBundled prefix: 実データを退避してマーカー token に差し替える。</summary>
+		/// <summary>SaveBundled prefix: 実データを退避して _token をマーカー token に差し替える。
+		/// SaveBundled は dictRaw を Dictionary<int, TextureContainer> として具体型で要求するため、
+		/// 配列を差し替えてはいけない（辞書そのものを書き換える）。</summary>
 		internal static List<object[]> SwapToMarkers(object dictRaw)
 		{
 			if (savingDepth <= 0) return null;
@@ -124,7 +126,7 @@ namespace KK_SceneExplorer
 					Log.LogWarning("[SceneExplorer] ME texture dedupe: 差し替え失敗（そのテクスチャはそのまま保存）: " + ex.Message);
 				}
 			}
-			return state;
+			return state.Count > 0 ? state : null;
 		}
 
 		/// <summary>hash 衝突していないことを確認して共有表へ登録する。衝突時は表を汚さず false。</summary>
