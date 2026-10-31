@@ -1186,10 +1186,116 @@ namespace KK_SceneExplorer
 				if (SceneExplorerPlugin.DedupeEnabled.Value)
 				{
 					ApplyMeTextureDedupe(harmony);
+					ApplyMemorySceneIo(harmony);
 				}
 				else
 				{
 					Log.LogInfo("ME texture dedupe: 設定で無効（既定 OFF）");
+				}
+			}
+
+			/// <summary>シーン保存/読み込みの FileStream をメモリへ差し替える（dedupe 有効時のみ）。
+			/// バニラ経路（対象外シーン）では書き出し内容・読み込み結果とも従来と同一になる。</summary>
+			private static void ApplyMemorySceneIo(Harmony harmony)
+			{
+				try
+				{
+					MethodInfo sceneSave = AccessTools.Method(typeof(Studio.SceneInfo), "Save", new Type[] { typeof(string) });
+					// Load(string) は Load(string, out Version) を呼ぶだけ。FileStream を開くのは後者
+					MethodInfo sceneLoad = AccessTools.Method(typeof(Studio.SceneInfo), "Load",
+						new Type[] { typeof(string), typeof(Version).MakeByRefType() });
+					if (sceneSave == null || sceneLoad == null)
+					{
+						Log.LogWarning("メモリ I/O: SceneInfo.Save/Load が見つからず無効");
+						return;
+					}
+					harmony.Patch(sceneSave, transpiler: new HarmonyMethod(AccessTools.Method(typeof(Patches), nameof(SceneInfoSaveStreamTranspiler))));
+					harmony.Patch(sceneLoad, transpiler: new HarmonyMethod(AccessTools.Method(typeof(Patches), nameof(SceneInfoLoadStreamTranspiler))));
+					Log.LogInfo("パッチ適用: メモリ I/O (SceneInfo.Save / SceneInfo.Load の FileStream 差し替え)");
+				}
+				catch (Exception ex)
+				{
+					// ここで落ちても既存機能（ブラウザ/設定UI/転送/dedupe）は生き残らせる
+					Log.LogWarning("メモリ I/O: パッチ適用に失敗したためメモリ I/O のみ無効化: " + ex);
+				}
+			}
+
+			private static readonly Type[] SaveStreamSignature = new Type[] { typeof(string), typeof(FileMode), typeof(FileAccess) };
+			private static readonly Type[] LoadStreamSignature = new Type[] { typeof(string), typeof(FileMode), typeof(FileAccess), typeof(FileShare) };
+
+			/// <summary>SceneInfo.Save: newobj FileStream(string, FileMode, FileAccess) を MemoryFileStream に置換する（挿入しない）。</summary>
+			private static IEnumerable<CodeInstruction> SceneInfoSaveStreamTranspiler(IEnumerable<CodeInstruction> instructions)
+			{
+				MethodBase target = AccessTools.Constructor(typeof(FileStream), SaveStreamSignature);
+				MethodBase replacement = AccessTools.Constructor(typeof(MemoryFileStream), SaveStreamSignature);
+				int replaced = 0;
+				foreach (CodeInstruction instruction in instructions)
+				{
+					if (instruction.opcode == OpCodes.Newobj && SameMethod(instruction.operand as MethodBase, target))
+					{
+						instruction.operand = replacement;
+						replaced++;
+					}
+					yield return instruction;
+				}
+				if (target == null || replacement == null)
+				{
+					SceneExplorerPlugin.Log.LogWarning("SceneInfo.Save Transpiler: FileStream/MemoryFileStream の ctor を解決できません");
+				}
+				else if (replaced == 0)
+				{
+					SceneExplorerPlugin.Log.LogWarning("SceneInfo.Save Transpiler: newobj FileStream(string,FileMode,FileAccess) が見つかりません（メモリ保存は無効のまま）");
+				}
+				else
+				{
+					SceneExplorerPlugin.Log.LogInfo("SceneInfo.Save Transpiler: FileStream を MemoryFileStream に置換しました（" + replaced + " 箇所）");
+				}
+			}
+
+			/// <summary>SceneInfo.Load: newobj FileStream(string, FileMode, FileAccess, FileShare) を
+			/// MemoryReadStream.Open（保持しているシーンが無ければ本来のパスから開く）に置換する。</summary>
+			private static IEnumerable<CodeInstruction> SceneInfoLoadStreamTranspiler(IEnumerable<CodeInstruction> instructions)
+			{
+				MethodBase target = AccessTools.Constructor(typeof(FileStream), LoadStreamSignature);
+				MethodInfo replacement = AccessTools.Method(typeof(MemoryReadStream), nameof(MemoryReadStream.Open), LoadStreamSignature);
+				int replaced = 0;
+				foreach (CodeInstruction instruction in instructions)
+				{
+					if (instruction.opcode == OpCodes.Newobj && SameMethod(instruction.operand as MethodBase, target))
+					{
+						// 戻り値の型は FileStream のままなので、ローカルへの格納はバニラと同じ IL で成立する
+						instruction.opcode = OpCodes.Call;
+						instruction.operand = replacement;
+						replaced++;
+					}
+					yield return instruction;
+				}
+				if (target == null || replacement == null)
+				{
+					SceneExplorerPlugin.Log.LogWarning("SceneInfo.Load Transpiler: FileStream の ctor / MemoryReadStream.Open を解決できません");
+				}
+				else if (replaced == 0)
+				{
+					SceneExplorerPlugin.Log.LogWarning("SceneInfo.Load Transpiler: newobj FileStream(string,FileMode,FileAccess,FileShare) が見つかりません（メモリ読み込みは無効のまま）");
+				}
+				else
+				{
+					SceneExplorerPlugin.Log.LogInfo("SceneInfo.Load Transpiler: FileStream を MemoryReadStream.Open に置換しました（" + replaced + " 箇所）");
+				}
+			}
+
+			/// <summary>Harmony が渡す MethodBase と AccessTools の解決結果を突き合わせる（参照が別でも同一メソッドなら一致と見なす）。</summary>
+			private static bool SameMethod(MethodBase a, MethodBase b)
+			{
+				if (a == null || b == null) return false;
+				if (a == b) return true;
+				try
+				{
+					return a.Module == b.Module && a.MetadataToken == b.MetadataToken;
+				}
+				catch (Exception)
+				{
+					return false;
 				}
 			}
 
@@ -1482,6 +1588,20 @@ namespace KK_SceneExplorer
 				{
 					return;
 				}
+				// メモリ保存（MemoryFileStream）の内容を実ファイルへ落とす。EndSceneSave は実ファイルへ追記するので必ず先。
+				// 通常は Dispose（Save の finally）で書き出し済み。ここは Dispose が飛んだ場合の保険（冪等）
+				MemoryFileStream saved = MemoryFileStream.TakeLast();
+				if (saved != null)
+				{
+					if (!saved.Commit())
+					{
+						MeTextureDedupe.AbortSceneSave();
+						TransferNotice.Show("シーンを保存できませんでした（書き出しに失敗）。\n" + Path.GetFileName(_path));
+						return;
+					}
+					// 直後の Load がディスクを触らずに済むよう保持する（次の保存で置き換え、1 回読んだら捨てる）
+					MemoryReadStream.Cache(_path, saved.Buffer.ToArray());
+				}
 				// dedupe チャンクの追記は転送より先。追記に失敗したファイル（=マーカーのまま）は転送しない
 				// （転送先のサイズ一致判定でローカル原本が消えるとテクスチャが全損する）
 				// DedupeEnabled で短絡してはいけない。パッチ登録は Awake 時に確定するので、
@@ -1533,6 +1653,8 @@ namespace KK_SceneExplorer
 			/// __exception は設定しない＝例外はそのまま伝播させる。</summary>
 			private static void SceneInfoSaveFinalizer(string _path, Exception __exception)
 			{
+				// 中断された保存のバッファは捨てる（postfix が飛んでも次回以降が古いバイト列を掴まないように）
+				MemoryFileStream.TakeLast();
 				if (__exception == null)
 				{
 					return;
