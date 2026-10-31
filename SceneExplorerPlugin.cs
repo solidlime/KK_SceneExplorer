@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Runtime.InteropServices;
 using System.Threading;
 using BepInEx;
 using BepInEx.Configuration;
@@ -576,6 +577,7 @@ namespace KK_SceneExplorer
 			DetectCardCompression();
 			bfCheckStartTime = Time.realtimeSinceStartup;
 			gameObject.AddComponent<SettingsUi>();
+			gameObject.AddComponent<TransferNotice>();
 			gameObject.AddComponent<SceneBrowser>();
 
 			// v2.1.1: 終了確認（StudioExit）・確認ダイアログ（StudioCheck）シーンを監視。
@@ -1299,7 +1301,8 @@ namespace KK_SceneExplorer
 				}
 				else
 				{
-					TransferNow(_path, dest);
+					// 同期転送すると全長照合込みで最大 228 秒（5 回リトライ + sleep）Studio が固まるため、プールへ逃がす
+					ThreadPool.QueueUserWorkItem(delegate { TransferNow(_path, dest); });
 				}
 			}
 
@@ -1399,6 +1402,9 @@ namespace KK_SceneExplorer
 			private const int TransferRetryAttempts = 5;
 			private const int TransferRetryIntervalMs = 2000;
 
+			[DllImport("kernel32.dll", SetLastError = true)]
+			private static extern bool FlushFileBuffers(IntPtr hFile);
+
 			private static void DelayedTransfer(string src, string dest)
 			{
 				try
@@ -1423,6 +1429,7 @@ namespace KK_SceneExplorer
 					}
 					if (!kkccCompressionActive)
 					{
+						// このメソッド自体がプール上で走るのでそのまま呼ぶ（再キューすると無意味な遅延になる）
 						TransferNow(src, dest);
 						return;
 					}
@@ -1460,6 +1467,7 @@ namespace KK_SceneExplorer
 				catch (Exception ex)
 				{
 					Log.LogError("ネットワーク転送（遅延）に失敗しました（ローカルに残します）: " + ex.ToString());
+					TransferNotice.Show("NAS へ転送できませんでした。ローカルに残しています。\n" + Path.GetFileName(src));
 				}
 			}
 
@@ -1502,38 +1510,203 @@ namespace KK_SceneExplorer
 				return true;
 			}
 
+			// 同一 src/dest への並行転送を直列化する。同時に走ると片方が他方の公開物を削除して全損しうる
+			private static readonly object TransferGate = new object();
+
 			private static void TransferNow(string src, string dest)
 			{
+				lock (TransferGate) { TransferNowCore(src, dest); }
+			}
+
+			/// <summary>ネットワークへ転送する。本文は一意な .part に書き、完了後に rename する。
+			/// 本名での公開は File.Move の 1 回だけ（SMB 上の同一ディレクトリ rename）なので、中断されたファイルが本名で現れることはない。
+			/// サイズ一致 かつ 全長バイト一致 を確認するまで File.Move も File.Delete(src) もしない。
+			/// 検出できないもの: File.Move 後にサーバー側で壊れる場合、転送完了後の別プロセスによる上書き。
+			/// 全長照合は 208MB シーンで +22 秒かかるが、1MB 以降の破損を見逃すと復旧不能なため正しさを優先する。</summary>
+			private static void TransferNowCore(string src, string dest)
+			{
+				string tmp = dest + "." + Guid.NewGuid().ToString("N") + ".part";
+				Exception lastError = null;
+				bool destRemoved = false;
 				try
 				{
-					Directory.CreateDirectory(Path.GetDirectoryName(dest));
 					for (int i = 0; i < TransferRetryAttempts; i++)
 					{
 						try
 						{
-							File.Copy(src, dest, true);
-							// コピー直後にサイズ一致を確認（KKCC の書き込み中は IOException かサイズ不一致になる）
-							if (new FileInfo(dest).Length == new FileInfo(src).Length)
+							Directory.CreateDirectory(Path.GetDirectoryName(dest));
+							long expected;
+							using (FileStream input = new FileStream(src, FileMode.Open, FileAccess.Read, FileShare.Read))
+							using (FileStream output = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+							{
+								expected = input.Length;
+								// net35 に Stream.CopyTo は無い
+								byte[] buffer = new byte[1024 * 1024];
+								int read;
+								while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
+								{
+									output.Write(buffer, 0, read);
+								}
+								output.Flush();
+								// net35 に FileStream.Flush(bool) は無い。SMB2 FLUSH を発行してサーバー側の永続化まで待つ
+#pragma warning disable 618
+								bool flushed = FlushFileBuffers(output.Handle);
+#pragma warning restore 618
+								if (!flushed) throw new IOException("FlushFileBuffers に失敗しました: " + dest);
+							}
+							long actual = new FileInfo(tmp).Length;
+							if (actual != expected) throw new IOException("サイズ不一致: " + actual + " != " + expected);
+							long differ = FindFirstDifference(src, tmp);
+							if (differ >= 0) throw new IOException("内容不一致（バイト位置 " + differ + "）: " + dest);
+							if (File.Exists(dest)) { File.Delete(dest); destRemoved = true; }
+							File.Move(tmp, dest);
+							Log.LogInfo("ネットワークへ転送しました: " + dest);
+							try
 							{
 								File.Delete(src);
-								Log.LogInfo("ネットワークへ転送しました: " + dest);
-								return;
 							}
+							catch (Exception ex)
+							{
+								Log.LogWarning("転送は成功しましたがローカル原本を削除できませんでした: " + src + " / " + ex.Message);
+							}
+							return;
 						}
-						catch (IOException) { }
-						catch (UnauthorizedAccessException) { }
+						catch (FileNotFoundException)
+						{
+							// 排他により先行の転送が完了して原本が削除済み（または tmp が外部から消された）
+							Log.LogInfo("転送対象が既に処理済みのため転送を中止しました: " + src);
+							return;
+						}
+						catch (IOException io) { lastError = io; }
+						catch (UnauthorizedAccessException ua) { lastError = ua; }
+						try { if (File.Exists(tmp)) File.Delete(tmp); } catch (Exception) { }
 						if (i < TransferRetryAttempts - 1)
 						{
-							Log.LogWarning("転送中に競合が発生（KK_CardCompressionの書き込み中？）。リトライします (" + (i + 1) + "/" + TransferRetryAttempts + "): " + dest);
+							Log.LogWarning("転送または検証に失敗（KK_CardCompressionの書き込み中？）。リトライします (" + (i + 1) + "/" + TransferRetryAttempts + "): " + dest + (destRemoved ? "（旧版は削除済み）" : "") + " / " + lastError.Message);
 							Thread.Sleep(TransferRetryIntervalMs);
 						}
 					}
-					Log.LogError("ネットワーク転送に失敗しました（ローカルに残します）: " + src);
+					string lastReason = lastError == null ? "" : " 最後の失敗理由: " + lastError.Message;
+					Log.LogError("ネットワーク転送に失敗しました（ローカルに残します）: " + src + lastReason + (destRemoved ? "（旧版は削除済み）" : ""));
+					TransferNotice.Show("NAS へ保存できませんでした。ローカルに残しています。\n" + Path.GetFileName(src) + (lastError == null ? "" : "\n" + lastError.Message) + (destRemoved ? "（旧版は削除済み）" : ""));
 				}
 				catch (Exception ex)
 				{
 					Log.LogError("ネットワーク転送に失敗しました（ローカルに残します）: " + ex.ToString());
+					TransferNotice.Show("NAS へ保存できませんでした。ローカルに残しています。\n" + Path.GetFileName(src) + "\n" + ex.Message);
 				}
+				finally
+				{
+					try { if (File.Exists(tmp)) File.Delete(tmp); } catch (Exception) { }
+				}
+			}
+
+			/// <summary>2 ファイルを全長比較し、最初に違う位置を返す（一致なら -1）。
+			/// b 側は SMB クライアントキャッシュを避けるため NoBuffering で開く（キャッシュに当たると
+			/// 「自分が書いたバイト列が返る」だけで、サーバーに届いていないことを検出できない）。
+			/// NoBuffering が使えない環境では通常読みに落ちる。</summary>
+			private static long FindFirstDifference(string a, string b)
+			{
+				FileStream fa = null;
+				UnbufferedFile fb = null;
+				try
+				{
+					fa = new FileStream(a, FileMode.Open, FileAccess.Read, FileShare.Read, 65536);
+					fb = UnbufferedFile.Open(b);
+					byte[] ba = new byte[65536];
+					byte[] bb = new byte[65536];
+					long offset = 0;
+					while (true)
+					{
+						int nb = fb.Read(bb);
+						// b 側が EOF。a 側も EOF なら一致、まだ読めるなら a が長い＝不一致
+						if (nb == 0) return fa.ReadByte() < 0 ? -1 : offset;
+						int na = ReadFull(fa, ba, nb);
+						if (na != nb) return offset;
+						for (int i = 0; i < na; i++)
+						{
+							if (ba[i] != bb[i]) return offset + i;
+						}
+						offset += na;
+					}
+				}
+				finally
+				{
+					if (fa != null) fa.Dispose();
+					if (fb != null) fb.Dispose();
+				}
+			}
+
+			private const uint GenericRead = 0x80000000;
+			private const uint FileShareAll = 0x00000007; // FILE_SHARE_READ | WRITE | DELETE
+			private const uint OpenExisting = 3;
+			private const uint FileFlagNoBuffering = 0x20000000;
+
+			[DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+			private static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+			[DllImport("kernel32.dll", SetLastError = true)]
+			private static extern bool ReadFile(IntPtr hFile, byte[] buffer, int bytesToRead, out int bytesRead, IntPtr overlapped);
+			[DllImport("kernel32.dll", SetLastError = true)]
+			private static extern bool CloseHandle(IntPtr hObject);
+
+			/// <summary>FILE_FLAG_NO_BUFFERING で開いたファイル。net35 の FileOptions に NoBuffering は無く（.NET 4.0 追加）、
+			/// 未知ビットは Mono が無視して通常のキャッシュ読みになり得るため、直接 CreateFileW で開く。
+			/// 読み出しはオフセット・長さとも 4096 の倍数に限る（NoBuffering の要件）。
+			/// 開けない・読めない環境では通常読みに落ちる。</summary>
+			private sealed class UnbufferedFile : IDisposable
+			{
+				private const int Alignment = 4096;
+				private IntPtr handle;
+				private FileStream fallback;
+
+				public static UnbufferedFile Open(string path)
+			{
+					UnbufferedFile f = new UnbufferedFile();
+					IntPtr h = CreateFileW(path, GenericRead, FileShareAll, IntPtr.Zero, OpenExisting, FileFlagNoBuffering, IntPtr.Zero);
+					if (h == (IntPtr)(-1))
+					{
+						// NoBuffering が開けない＝クライアントキャッシュ経由の弱い検証になる。黙って落ちると検証の意味が消えるので残す
+						Log.LogWarning("NoBuffering で開けませんでした。キャッシュ経由の弱い検証になります（err=" + Marshal.GetLastWin32Error() + "）: " + path);
+						f.fallback = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 65536);
+					}
+					else f.handle = h;
+					return f;
+				}
+
+				/// <summary>buffer を埋まるまで読む。4096 の倍数に切り捨て、余りは次の読みに回す。</summary>
+				public int Read(byte[] buffer)
+			{
+					int want = buffer.Length & ~(Alignment - 1);
+					if (want < Alignment) want = buffer.Length;   // 短いバッファはそのまま読む（NoBuffering 要件は呼び出し側の責務）
+					if (handle == IntPtr.Zero) return fallback.Read(buffer, 0, want);
+					int got;
+					if (!ReadFile(handle, buffer, want, out got, IntPtr.Zero))
+					{
+						int err = Marshal.GetLastWin32Error();
+						if (err == 38) return 0; // ERROR_HANDLE_EOF
+						throw new IOException("ReadFile に失敗しました: " + err);
+					}
+					return got;
+				}
+
+				public void Dispose()
+				{
+					if (handle != IntPtr.Zero) { CloseHandle(handle); handle = IntPtr.Zero; }
+					if (fallback != null) { fallback.Dispose(); fallback = null; }
+				}
+			}
+
+			/// <summary>バッファが埋まる（または limit に達する）まで読む。末尾で足りない場合は読めた分だけ返す。</summary>
+			private static int ReadFull(Stream stream, byte[] buffer, int limit)
+			{
+				int total = 0;
+				while (total < limit)
+				{
+					int n = stream.Read(buffer, total, limit - total);
+					if (n <= 0) break;
+					total += n;
+				}
+				return total;
 			}
 		}
 	}
