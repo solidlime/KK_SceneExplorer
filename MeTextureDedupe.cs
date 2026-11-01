@@ -214,13 +214,16 @@ namespace KK_SceneExplorer
 		private static void QueueConvert(Dictionary<long, byte[]> table)
 		{
 			if (webpEncoder == null || table == null) return;
-			int added = 0, decodeFailed = 0;
+			int added = 0, decodeFailed = 0, alreadyWebP = 0;
 			foreach (KeyValuePair<long, byte[]> kv in table)
 			{
+				// ME のチャンクは元から WebP（RIFF/WEBP/VP8L）。デコードして再エンコードすると
+				// 元より大きくなり、時間もメモリも無駄になるので素通しで格納する
+				if (IsWebP(kv.Value)) { alreadyWebP++; continue; }
+
 				lock (convertLock)
 				{
 					if (webpCache.ContainsKey(kv.Key) || !convertQueued.Add(kv.Key)) continue;
-					if (IsWebP(kv.Value)) { convertQueued.Remove(kv.Key); webpCache[kv.Key] = kv.Value; continue; }
 				}
 
 				// PNG -> RGBA は Unity のテクスチャ API（メインスレッド専用）を使うのでここで済ませる
@@ -241,6 +244,10 @@ namespace KK_SceneExplorer
 				item.pngLength = kv.Value.Length;
 				lock (convertLock) convertQueue.Enqueue(item);
 				added++;
+			}
+			if (alreadyWebP > 0)
+			{
+				Log.LogInfo("[SceneExplorer] ME texture dedupe: 既に WebP のため変換をスキップ: " + alreadyWebP + " 枚");
 			}
 			if (decodeFailed > 0)
 			{
