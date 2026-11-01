@@ -1382,19 +1382,28 @@ namespace KK_SceneExplorer
 			}
 
 			// 共有表に格納する PNG を WebP(ロスレス) に変換する。
-			// libwebp.dll を P/Invoke で直接叩くので Texture2D に触らず、ワーカースレッドで動かせる。
+			// Mono の P/Invoke は DllImport("libwebp") をモジュール名で dlopen するため、フルパスで
+			// LoadLibrary しておいても解決できない（実機で DllNotFoundException）。
+			// そのため LoadLibraryW + GetProcAddress で関数ポインタを自前解決してデリゲートで呼ぶ。
 			// DLL は build.cmd が BepInEx/plugins へコピーする（ME 同梱の libwebp.lib と同一バイナリ）。
-			private const string WebPDll = "libwebp";
+			[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+			private delegate int WebPEncodeLosslessRGBAProc(byte[] rgba, int width, int height, int stride, out IntPtr output);
 
-			[DllImport(WebPDll, CallingConvention = CallingConvention.Cdecl)]
-			private static extern int WebPEncodeLosslessRGBA(byte[] rgba, int width, int height, int stride, out IntPtr output);
+			[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+			private delegate void WebPFreeProc(IntPtr output);
 
-			[DllImport(WebPDll, CallingConvention = CallingConvention.Cdecl)]
-			private static extern void WebPFree(IntPtr output);
+			[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+			private delegate int WebPGetEncoderVersionProc();
+
+			// デリゲートは呼び出し中 GC されないよう静的フィールドで保持する
+			private static WebPEncodeLosslessRGBAProc webpEncodeLossless;
+			private static WebPFreeProc webpFree;
+			private static WebPGetEncoderVersionProc webpGetEncoderVersion;
 
 			/// <summary>PNG バイト列をロスレス WebP に変換する。失敗時は null。</summary>
 			internal static byte[] EncodePngToWebP(byte[] png)
 			{
+				if (webpEncodeLossless == null || webpFree == null) return null;
 				using (MemoryStream ms = new MemoryStream(png, false))
 				using (Bitmap bmp = new Bitmap(ms))
 				{
@@ -1421,7 +1430,7 @@ namespace KK_SceneExplorer
 						}
 
 						IntPtr outPtr;
-						int size = WebPEncodeLosslessRGBA(rgba, w, h, w * 4, out outPtr);
+						int size = webpEncodeLossless(rgba, w, h, w * 4, out outPtr);
 						if (size <= 0) return null;
 						try
 						{
@@ -1429,7 +1438,7 @@ namespace KK_SceneExplorer
 							Marshal.Copy(outPtr, webp, 0, size);
 							return webp;
 						}
-						finally { WebPFree(outPtr); }
+						finally { webpFree(outPtr); }
 					}
 					finally { bmp.UnlockBits(bd); }
 				}
@@ -1437,6 +1446,26 @@ namespace KK_SceneExplorer
 
 			[DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
 			private static extern IntPtr LoadLibraryW(string path);
+
+			[DllImport("kernel32", CharSet = CharSet.Ansi, SetLastError = true)]
+			private static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
+
+			/// <summary>モジュールから WebP の関数を解決する。1 つでも欠けたら false。</summary>
+			private static bool ResolveWebPFunctions(IntPtr module)
+			{
+				IntPtr pEncode = GetProcAddress(module, "WebPEncodeLosslessRGBA");
+				IntPtr pFree = GetProcAddress(module, "WebPFree");
+				IntPtr pVersion = GetProcAddress(module, "WebPGetEncoderVersion");
+				if (pEncode == IntPtr.Zero || pFree == IntPtr.Zero || pVersion == IntPtr.Zero)
+				{
+					Log.LogWarning("libwebp: エクスポートを解決できません (encode=" + pEncode + " free=" + pFree + " version=" + pVersion + ")");
+					return false;
+				}
+				webpEncodeLossless = (WebPEncodeLosslessRGBAProc)Marshal.GetDelegateForFunctionPointer(pEncode, typeof(WebPEncodeLosslessRGBAProc));
+				webpFree = (WebPFreeProc)Marshal.GetDelegateForFunctionPointer(pFree, typeof(WebPFreeProc));
+				webpGetEncoderVersion = (WebPGetEncoderVersionProc)Marshal.GetDelegateForFunctionPointer(pVersion, typeof(WebPGetEncoderVersionProc));
+				return true;
+			}
 
 			/// <summary>plugins 直下の libwebp.dll をフルパスで先に読み込む。Unity の検索パスには入っていない。</summary>
 			private static bool EnsureWebPLoaded()
@@ -1454,14 +1483,17 @@ namespace KK_SceneExplorer
 					if (!File.Exists(path)) continue;
 					try
 					{
-						if (LoadLibraryW(path) != IntPtr.Zero)
+						IntPtr module = LoadLibraryW(path);
+						if (module == IntPtr.Zero)
 						{
-							Log.LogInfo("libwebp を読み込んだ: " + path);
-							// 解決できるか実際に呼んで確かめる
-							WebPFree(IntPtr.Zero);
-							return true;
+							Log.LogWarning("LoadLibrary に失敗: " + path + " (err=" + Marshal.GetLastWin32Error() + ")");
+							continue;
 						}
-						Log.LogWarning("LoadLibrary に失敗: " + path + " (err=" + Marshal.GetLastWin32Error() + ")");
+						Log.LogInfo("libwebp を読み込んだ: " + path);
+						if (!ResolveWebPFunctions(module)) continue;
+						// 解決確認はバージョン取得で行う（WebPFree(IntPtr.Zero) は実機で例外になった）
+						Log.LogInfo("libwebp エンコーダのバージョン: " + webpGetEncoderVersion());
+						return true;
 					}
 					catch (Exception ex)
 					{
