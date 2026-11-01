@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -70,6 +71,14 @@ namespace KK_SceneExplorer
 		private static readonly Queue<ConvertItem> convertQueue = new Queue<ConvertItem>();
 		// 変換待ちの重複登録を防ぐ
 		private static readonly HashSet<long> convertQueued = new HashSet<long>();
+
+		// ロード進捗（BeginSceneLoad で開始し、RestoreLoadedBlob の累積で進める）
+		private static int restoreTotal;
+		private static int restoreDone;
+		private static Stopwatch loadWatch;
+
+		/// <summary>直近に書いたチャンクのテクスチャ枚数（保存完了サマリ用）。</summary>
+		internal static int ChunkTextureCount;
 
 		/// <summary>変換待ち 1 枚分。rgba は既に PNG から展開済み（Unity API はメインスレッド専用のため）。</summary>
 		private sealed class ConvertItem
@@ -499,12 +508,21 @@ namespace KK_SceneExplorer
 			BinaryWriter writer = new BinaryWriter(output);
 			writer.Write(ChunkMagic);
 			writer.Write((uint)pendingBlob.Count);
+			ChunkTextureCount = pendingBlob.Count;
+			int index = 0;
 			foreach (KeyValuePair<long, byte[]> kv in pendingBlob)
 			{
 				writer.Write(kv.Key);
 				writer.Write((uint)kv.Value.Length);
 				writer.Write(kv.Value);
 				rawBytes += kv.Value.Length;
+				index++;
+				// 毎枚通知すると重いので 10 枚ごとと最後だけ
+				if (index % 10 == 0 || index == pendingBlob.Count)
+				{
+					TransferNotice.ShowProgress("シーンを保存中", "テクスチャ " + index + " / " + pendingBlob.Count,
+						(float)index / pendingBlob.Count);
+				}
 			}
 			writer.Flush();
 			long payloadLength = output.Position - start;
@@ -581,6 +599,9 @@ namespace KK_SceneExplorer
 			// 冒頭の Invalidate で古いバッファを捨て、ディスクの現在の内容から作り直す。
 			loadedBlob = null;
 			loadedPath = path;
+			restoreTotal = 0;
+			restoreDone = 0;
+			loadWatch = null;
 			if (!File.Exists(path)) return;
 
 			// これからディスクから読み直すので、そのパスの古いキャッシュは先に捨てる
@@ -595,6 +616,10 @@ namespace KK_SceneExplorer
 					Dictionary<long, byte[]> table = ReadChunk(stream, false, out bodyLength);
 					if (table == null) return;
 					loadedBlob = table;
+					// 進捗は枚数比なので、チャンクの枚数を分母にする
+					restoreTotal = table.Count;
+					restoreDone = 0;
+					loadWatch = Stopwatch.StartNew();
 					// シーン本体（チャンク手前まで）もここで読む。開いたまま読むのでディスクは 1 回だけ
 					byte[] body = ReadBody(stream, bodyLength);
 					if (body != null) MemoryReadStream.Cache(path, body, body.Length);
@@ -658,6 +683,9 @@ namespace KK_SceneExplorer
 					// Data setter は Acquire(実データ) → Release(マーカー) の順で正しく参照を付け替える
 					dataProp.SetValue(container, real, null);
 					restored++;
+					restoreDone++;
+					// 毎枚通知すると重いので 10 枚ごとと最後だけ
+					if (restoreTotal > 0 && (restoreDone % 10 == 0 || restoreDone >= restoreTotal)) ShowLoadProgress();
 				}
 				catch (Exception ex)
 				{
@@ -684,6 +712,30 @@ namespace KK_SceneExplorer
 			{
 				Log.LogWarning("[SceneExplorer] ME texture dedupe: TextureContainer 型を解決できず展開できませんでした: " + loadedPath);
 			}
+		}
+
+		/// <summary>ロード進捗のトースト表示。最後の 1 枚で締めて完了サマリを出す。失敗しても本体処理は止めない。</summary>
+		private static void ShowLoadProgress()
+		{
+			try
+			{
+				if (loadWatch == null || restoreTotal <= 0) return;
+				if (restoreDone < restoreTotal)
+				{
+					TransferNotice.ShowProgress("シーンを読み込み中",
+						"テクスチャ " + restoreDone + " / " + restoreTotal, (float)restoreDone / restoreTotal);
+					return;
+				}
+				// RestoreLoadedBlob は 1 ロードで複数回呼ばれるので、最後の 1 回だけ締める
+				long total = restoreTotal;
+				string summary = "読み込み完了: " + (loadWatch.ElapsedMilliseconds / 1000.0).ToString("0.0")
+					+ " 秒 / テクスチャ " + total + " 枚";
+				loadWatch = null;
+				restoreTotal = 0;
+				TransferNotice.ClearProgress();
+				TransferNotice.Show(summary);
+			}
+			catch (Exception) { }
 		}
 
 		/// <summary>末尾の dedupe チャンクを読む。headersOnly = データ本体を読まず hash と長さだけ（検証用）。
@@ -787,7 +839,7 @@ namespace KK_SceneExplorer
 			return true;
 		}
 
-		private static string FormatBytes(long value)
+			internal static string FormatBytes(long value)
 		{
 			if (value >= 1073741824L) return (value / 1073741824d).ToString("0.00") + " GB";
 			if (value >= 1048576L) return (value / 1048576d).ToString("0.0") + " MB";

@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Reflection.Emit;
@@ -62,6 +63,10 @@ namespace KK_SceneExplorer
 		public static ConfigEntry<bool> DedupeEnabled;
 		// シーン保存時にローカルへファイルを作るか（既定 false = メモリ上のバイト列を最終保存先へ直接書く）
 		public static ConfigEntry<bool> WriteLocalCopy;
+		// 進捗トーストにメモリ使用量を出すか（既定 false）
+		public static ConfigEntry<bool> ShowProgressMemory;
+		// 保存開始からの経過時間（完了サマリ用）。転送スレッドと共有するので volatile にはせず参照だけ渡す
+		internal static Stopwatch SaveWatch;
 
 		internal static string lastSceneFolder;
 		internal static string lastLoadedFolder;
@@ -582,6 +587,8 @@ namespace KK_SceneExplorer
 			// 後続の mod がローカルファイルを読む場合や、書き出し失敗時にローカルへ落としたい場合は true
 			WriteLocalCopy = Config.Bind("Save", "WriteLocalCopy", false,
 				"シーン保存時にローカルへもファイルを作る（false=メモリから直接保存・KK_CardCompression 使用時は自動で true 相当）");
+			ShowProgressMemory = Config.Bind("Save", "ShowProgressMemory", false,
+				"進捗トーストにメモリ使用量（WorkingSet と GC ヒープ）を表示する（既定 false）");
 
 			HarmonyInstance = new Harmony(GUID);
 			Patches.ApplyAll(HarmonyInstance);
@@ -1680,6 +1687,7 @@ namespace KK_SceneExplorer
 					Log.LogInfo("保存: メモリ上のデータを最終保存先へ書き出します: " + finalPath);
 					byte[] data = transferData;
 					int length = transferLength;
+					SceneExplorerPlugin.SaveWatch = Stopwatch.StartNew();
 					ThreadPool.QueueUserWorkItem(delegate { TransferBytes(data, length, finalPath); });
 					return;
 				}
@@ -1930,6 +1938,52 @@ namespace KK_SceneExplorer
 				lock (TransferGate) { TransferBytesCore(data, length, dest); }
 			}
 
+			// 進捗を出す下限。これ未満は一括で書く（1MB 刻みの通知が無駄になるだけ）
+			private const int ProgressMinBytes = 4 << 20;
+			private const int WriteChunkSize = 1 << 20;
+
+			// 1MB ずつ書く。進捗は 4MB 進むか書き終えたときだけ出す（1MB ごとの通知は重いだけ）
+			private static void WriteWithProgress(FileStream output, byte[] data, int length)
+			{
+				if (length < ProgressMinBytes)
+				{
+					output.Write(data, 0, length);
+					return;
+				}
+				int written = 0, lastShown = 0;
+				while (written < length)
+				{
+					int count = Math.Min(WriteChunkSize, length - written);
+					output.Write(data, written, count);
+					written += count;
+					if (written - lastShown >= ProgressMinBytes || written >= length)
+					{
+						lastShown = written;
+						TransferNotice.ShowProgress("シーンを書き込み中",
+							ToMegabytes(written) + " / " + ToMegabytes(length) + " MB", (float)written / length);
+					}
+				}
+			}
+
+			private static string ToMegabytes(long bytes)
+			{
+				return (bytes / 1048576d).ToString("0.0");
+			}
+
+			private static void ShowSaveSummary(int length)
+			{
+				try
+				{
+					Stopwatch watch = SceneExplorerPlugin.SaveWatch;
+					SceneExplorerPlugin.SaveWatch = null;
+					TransferNotice.ClearProgress();
+					TransferNotice.Show("保存完了: " + MeTextureDedupe.FormatBytes(length)
+						+ (watch == null ? "" : " / " + (watch.ElapsedMilliseconds / 1000.0).ToString("0.0") + " 秒")
+						+ " / テクスチャ " + MeTextureDedupe.ChunkTextureCount + " 枚");
+				}
+				catch (Exception) { }
+			}
+
 			private static void TransferBytesCore(byte[] data, int length, string dest)
 			{
 				string tmp = dest + "." + Guid.NewGuid().ToString("N") + ".part";
@@ -1948,7 +2002,7 @@ namespace KK_SceneExplorer
 							if (!File.Exists(dest) && File.Exists(bak)) File.Move(bak, dest);
 							using (FileStream output = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
 							{
-								output.Write(data, 0, length);
+								WriteWithProgress(output, data, length);
 								output.Flush();
 #pragma warning disable 618 // net35 に FileStream.Flush(bool) は無い
 								if (!FlushFileBuffers(output.Handle)) throw new IOException("FlushFileBuffers に失敗しました: " + dest);
@@ -1978,6 +2032,7 @@ namespace KK_SceneExplorer
 							}
 							if (backedUp) { try { File.Delete(bak); } catch (Exception) { } }
 							Log.LogInfo("シーンを書き出しました（メモリから）: " + dest);
+							ShowSaveSummary(length);
 							return;
 						}
 						catch (IOException io) { lastError = io; }
