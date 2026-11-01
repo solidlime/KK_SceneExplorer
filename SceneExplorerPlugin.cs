@@ -1,7 +1,5 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Drawing;
-using System.Drawing.Imaging;
 using System.IO;
 using System.Reflection;
 using System.Reflection.Emit;
@@ -1364,7 +1362,7 @@ namespace KK_SceneExplorer
 					MethodInfo loadVersion = AccessTools.Method(typeof(Studio.SceneInfo), "Load",
 						new Type[] { typeof(string), typeof(Version).MakeByRefType() });
 					if (loadVersion != null) harmony.Patch(loadVersion, prefix: loadPrefix);
-					Func<byte[], byte[]> encoder = BuildWebPEncoder();
+					Func<byte[], int, int, byte[]> encoder = BuildWebPEncoder();
 					MeTextureDedupe.SetWebPEncoder(encoder);
 					Log.LogInfo("パッチ適用: ME texture dedupe (TextureSaveHandler / SceneInfo.Save / SceneInfo.Load)"
 						+ (encoder == null ? " / WebP 変換なし（PNG 格納）" : " / WebP ロスレス変換あり（libwebp / 別スレッド）"));
@@ -1382,9 +1380,8 @@ namespace KK_SceneExplorer
 			}
 
 			// 共有表に格納する PNG を WebP(ロスレス) に変換する。
-			// Mono の P/Invoke は DllImport("libwebp") をモジュール名で dlopen するため、フルパスで
-			// LoadLibrary しておいても解決できない（実機で DllNotFoundException）。
-			// そのため LoadLibraryW + GetProcAddress で関数ポインタを自前解決してデリゲートで呼ぶ。
+			// Unity の Mono には GDI+ のアセンブリが無いので、PNG -> RGBA はメインスレッドで Texture2D が行う
+			// （MeTextureDedupe.TryDecodePng）。ここはワーカースレッドから RGBA を受けて libwebp を叩くだけ。
 			// DLL は build.cmd が BepInEx/plugins へコピーする（ME 同梱の libwebp.lib と同一バイナリ）。
 			[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 			private delegate int WebPEncodeLosslessRGBAProc(byte[] rgba, int width, int height, int stride, out IntPtr output);
@@ -1401,47 +1398,21 @@ namespace KK_SceneExplorer
 			private static WebPGetEncoderVersionProc webpGetEncoderVersion;
 
 			/// <summary>PNG バイト列をロスレス WebP に変換する。失敗時は null。</summary>
-			internal static byte[] EncodePngToWebP(byte[] png)
+			internal static byte[] EncodeRgbaToWebP(byte[] rgba, int w, int h)
 			{
 				if (webpEncodeLossless == null || webpFree == null) return null;
-				using (MemoryStream ms = new MemoryStream(png, false))
-				using (Bitmap bmp = new Bitmap(ms))
-				{
-					int w = bmp.Width, h = bmp.Height;
-					BitmapData bd = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
-					try
-					{
-						byte[] rgba = new byte[w * h * 4];
-						byte[] row = new byte[w * 4];
-						for (int y = 0; y < h; y++)
-						{
-							// net35 に IntPtr.Add が無いので自前で足す
-							Marshal.Copy(new IntPtr(bd.Scan0.ToInt64() + (long)y * bd.Stride), row, 0, row.Length);
-							int o = y * w * 4;
-							for (int x = 0; x < w; x++)
-							{
-								// GDI+ は BGRA。WebP は RGBA
-								rgba[o] = row[x * 4 + 2];
-								rgba[o + 1] = row[x * 4 + 1];
-								rgba[o + 2] = row[x * 4];
-								rgba[o + 3] = row[x * 4 + 3];
-								o += 4;
-							}
-						}
+				if (rgba == null || w <= 0 || h <= 0 || rgba.Length < w * h * 4) return null;
 
-						IntPtr outPtr;
-						int size = webpEncodeLossless(rgba, w, h, w * 4, out outPtr);
-						if (size <= 0) return null;
-						try
-						{
-							byte[] webp = new byte[size];
-							Marshal.Copy(outPtr, webp, 0, size);
-							return webp;
-						}
-						finally { webpFree(outPtr); }
-					}
-					finally { bmp.UnlockBits(bd); }
+				IntPtr outPtr;
+				int size = webpEncodeLossless(rgba, w, h, w * 4, out outPtr);
+				if (size <= 0) return null;
+				try
+				{
+					byte[] webp = new byte[size];
+					Marshal.Copy(outPtr, webp, 0, size);
+					return webp;
 				}
+				finally { webpFree(outPtr); }
 			}
 
 			[DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -1503,14 +1474,14 @@ namespace KK_SceneExplorer
 				return false;
 			}
 
-			private static Func<byte[], byte[]> BuildWebPEncoder()
+			private static Func<byte[], int, int, byte[]> BuildWebPEncoder()
 			{
 				if (!EnsureWebPLoaded())
 				{
 					Log.LogWarning("libwebp.dll が見つからないため WebP 変換を無効化（PNG で保存します）");
 					return null;
 				}
-				return EncodePngToWebP;
+				return EncodeRgbaToWebP;
 			}
 
 			private static void SceneInfoSaveDedupePrefix()

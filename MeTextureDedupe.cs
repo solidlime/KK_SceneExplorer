@@ -7,6 +7,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Text;
 using BepInEx.Logging;
+using UnityEngine;
 
 namespace KK_SceneExplorer
 {
@@ -62,20 +63,32 @@ namespace KK_SceneExplorer
 
 		// 変換結果のキャッシュ（hash -> WebP バイト列）。再起動で消えるが、連続保存では効く
 		private static readonly Dictionary<long, byte[]> webpCache = new Dictionary<long, byte[]>();
-		// PNG -> WebP(ロスレス) 変換。null = 変換しない（PNG のまま格納）
-		private static Func<byte[], byte[]> webpEncoder;
-		// バックグラウンド変換の待ち行列（FIFO）。Update ごとに1枚だけ処理する
-		private static readonly Queue<KeyValuePair<long, byte[]>> convertQueue = new Queue<KeyValuePair<long, byte[]>>();
+		// RGBA -> WebP(ロスレス) 変換。null = 変換しない（PNG のまま格納）
+		private static Func<byte[], int, int, byte[]> webpEncoder;
+		// バックグラウンド変換の待ち行列（FIFO）。デコードはメインスレッドで済ませ、
+		// ワーカーは libwebp 呼び出し（＝RGBA -> WebP）だけを行う
+		private static readonly Queue<ConvertItem> convertQueue = new Queue<ConvertItem>();
 		// 変換待ちの重複登録を防ぐ
 		private static readonly HashSet<long> convertQueued = new HashSet<long>();
+
+		/// <summary>変換待ち 1 枚分。rgba は既に PNG から展開済み（Unity API はメインスレッド専用のため）。</summary>
+		private sealed class ConvertItem
+		{
+			internal long hash;
+			internal byte[] rgba;
+			internal int width;
+			internal int height;
+			// 変換後と比較するための元 PNG の長さ（WebP の方が大きいならキャッシュしない）
+			internal int pngLength;
+		}
 
 		// 直近に読み込んだシーンの共有表。null = チャンク無し（バニラ）
 		private static Dictionary<long, byte[]> loadedBlob;
 		// ログ用（"どのシーンの話か"）。ロードの可否判定には使わない
 		private static string loadedPath;
 
-		/// <summary>PNG を WebP に変換する関数を差し込む。null で無効化（PNG のまま格納）。</summary>
-		internal static void SetWebPEncoder(Func<byte[], byte[]> encoder)
+		/// <summary>PNG を WebP に変換する関数を差し込む（rgba, width, height -> webp）。null で無効化（PNG のまま格納）。</summary>
+		internal static void SetWebPEncoder(Func<byte[], int, int, byte[]> encoder)
 		{
 			webpEncoder = encoder;
 			ClearWebPCache();
@@ -201,21 +214,91 @@ namespace KK_SceneExplorer
 		private static void QueueConvert(Dictionary<long, byte[]> table)
 		{
 			if (webpEncoder == null || table == null) return;
-			int added = 0;
-			lock (convertLock)
+			int added = 0, decodeFailed = 0;
+			foreach (KeyValuePair<long, byte[]> kv in table)
 			{
-				foreach (KeyValuePair<long, byte[]> kv in table)
+				lock (convertLock)
 				{
 					if (webpCache.ContainsKey(kv.Key) || !convertQueued.Add(kv.Key)) continue;
 					if (IsWebP(kv.Value)) { convertQueued.Remove(kv.Key); webpCache[kv.Key] = kv.Value; continue; }
-					convertQueue.Enqueue(kv);
-					added++;
 				}
+
+				// PNG -> RGBA は Unity のテクスチャ API（メインスレッド専用）を使うのでここで済ませる
+				byte[] rgba;
+				int w, h;
+				if (!TryDecodePng(kv.Value, out rgba, out w, out h))
+				{
+					lock (convertLock) convertQueued.Remove(kv.Key);
+					decodeFailed++;
+					continue;
+				}
+
+				ConvertItem item = new ConvertItem();
+				item.hash = kv.Key;
+				item.rgba = rgba;
+				item.width = w;
+				item.height = h;
+				item.pngLength = kv.Value.Length;
+				lock (convertLock) convertQueue.Enqueue(item);
+				added++;
+			}
+			if (decodeFailed > 0)
+			{
+				Log.LogWarning("[SceneExplorer] ME texture dedupe: " + decodeFailed + " 枚は PNG を展開できず WebP 化しません（PNG で保存します）");
 			}
 			if (added > 0)
 			{
 				Log.LogInfo("[SceneExplorer] ME texture dedupe: WebP 変換を " + added + " 枚キューに追加（別スレッドで進めます）");
 				PumpConvert();
+			}
+		}
+
+		/// <summary>PNG を RGBA32（top-down）に開く。Unity のテクスチャ API はメインスレッド専用なので、
+		/// ワーカーへ渡す前にここで済ませる。Unity のテクスチャは bottom-up なので行を反転する。</summary>
+		private static bool TryDecodePng(byte[] png, out byte[] rgba, out int width, out int height)
+		{
+			rgba = null;
+			width = 0;
+			height = 0;
+			Texture2D tex = null;
+			try
+			{
+				// KK は Unity 5.6。ImageConversion.LoadImage は 2017.3 以降なので使えない
+#pragma warning disable 618
+				tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+				if (!tex.LoadImage(png)) return false;
+#pragma warning restore 618
+				width = tex.width;
+				height = tex.height;
+				Color32[] px = tex.GetPixels32();
+				if (width <= 0 || height <= 0 || px == null || px.Length < width * height) return false;
+
+				rgba = new byte[width * height * 4];
+				for (int y = 0; y < height; y++)
+				{
+					// Unity: 行 0 が下端 / WebP: 行 0 が上端
+					int src = (height - 1 - y) * width;
+					int dst = y * width * 4;
+					for (int x = 0; x < width; x++)
+					{
+						Color32 c = px[src + x];
+						rgba[dst] = c.r;
+						rgba[dst + 1] = c.g;
+						rgba[dst + 2] = c.b;
+						rgba[dst + 3] = c.a;
+						dst += 4;
+					}
+				}
+				return true;
+			}
+			catch (Exception ex)
+			{
+				Log.LogWarning("[SceneExplorer] ME texture dedupe: PNG の展開に失敗（PNG のまま保存）: " + ex.Message);
+				return false;
+			}
+			finally
+			{
+				if (tex != null) UnityEngine.Object.Destroy(tex);
 			}
 		}
 
@@ -256,19 +339,19 @@ namespace KK_SceneExplorer
 				{
 					while (true)
 					{
-						KeyValuePair<long, byte[]> item;
+						ConvertItem item;
 						lock (convertLock)
 						{
 							if (convertQueue.Count == 0) break;
 							item = convertQueue.Dequeue();
-							convertQueued.Remove(item.Key);
-							if (webpCache.ContainsKey(item.Key)) continue;
+							convertQueued.Remove(item.hash);
+							if (webpCache.ContainsKey(item.hash)) continue;
 						}
 
-						byte[] webp = webpEncoder(item.Value);
-						if (webp != null && webp.Length < item.Value.Length)
+						byte[] webp = webpEncoder(item.rgba, item.width, item.height);
+						if (webp != null && webp.Length < item.pngLength)
 						{
-							lock (convertLock) webpCache[item.Key] = webp;
+							lock (convertLock) webpCache[item.hash] = webp;
 						}
 					}
 
