@@ -103,7 +103,7 @@ namespace KK_SceneExplorer
 			ClearWebPCache();
 		}
 
-		/// <summary>変換済みなら WebP、未変換なら PNG をそのまま返す（保存を止めない）。</summary>
+		/// <summary>保存時に同期で PNG を WebP へ変換する。変換できない/大きくなる場合は PNG をそのまま返す。</summary>
 		private static byte[] ToWebP(long hash, byte[] png)
 		{
 			byte[] cached;
@@ -111,7 +111,21 @@ namespace KK_SceneExplorer
 			{
 				if (webpCache.TryGetValue(hash, out cached)) return cached;
 			}
-			return png;
+			if (webpEncoder == null) return png;
+			// ME のチャンクは元から WebP（RIFF/WEBP/VP8L）。デコードして再エンコードすると大きくなるので素通し
+			if (IsWebP(png)) return png;
+
+			// 保存はメインスレッドなので、Unity のテクスチャ API を使う展開をここで済ませる
+			byte[] rgba;
+			int w, h;
+			if (!TryDecodePng(png, out rgba, out w, out h)) return png;
+
+			byte[] webp = webpEncoder(rgba, w, h);
+			// 変換しても小さくならないなら PNG のまま保存する
+			if (webp == null || webp.Length >= png.Length) return png;
+
+			lock (convertLock) webpCache[hash] = webp;
+			return webp;
 		}
 
 		/// <summary>変換待ち枚数（診断用）。</summary>
@@ -165,8 +179,16 @@ namespace KK_SceneExplorer
 			if (!EnsureReflection(sample.GetType())) return null;
 
 			List<object[]> state = new List<object[]>();
+			int index = 0;
+			int total = dict.Count;
 			foreach (DictionaryEntry entry in dict)
 			{
+				index++;
+				// 毎枚通知すると重いので 10 枚ごとと最後だけ
+				if (index % 10 == 0 || index >= total)
+				{
+					TransferNotice.ShowProgress("シーンを保存中", "テクスチャ " + index + " / " + total, (float)index / total);
+				}
 				object container = entry.Value;
 				if (container == null) continue;
 				try
@@ -623,7 +645,6 @@ namespace KK_SceneExplorer
 					// シーン本体（チャンク手前まで）もここで読む。開いたまま読むのでディスクは 1 回だけ
 					byte[] body = ReadBody(stream, bodyLength);
 					if (body != null) MemoryReadStream.Cache(path, body, body.Length);
-					QueueConvert(table);
 					Log.LogInfo("[SceneExplorer] ME texture dedupe チャンク検出: " + table.Count + " 枚を展開: " + path);
 				}
 			}
