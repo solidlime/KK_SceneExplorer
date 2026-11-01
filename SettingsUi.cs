@@ -187,12 +187,6 @@ namespace KK_SceneExplorer
 			_stylesReady = true;
 		}
 
-		/// <summary>フォントサイズ変更を反映するため、次回OnGUIでスタイルを再生成させる。</summary>
-		public void RefreshStyles()
-		{
-			_stylesReady = false;
-		}
-
 		// ═══════════════════════════════════════════════════════
 		// OnGUI
 		// ═══════════════════════════════════════════════════════

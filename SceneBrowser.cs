@@ -9,13 +9,11 @@ using Manager;
 using UnityEngine;
 using UnityEngine.UI;   // v3.3.1: 透明 uGUI ブロックレイヤー（Canvas/Image/GraphicRaycaster）
 
-#pragma warning disable CS0414 // フィールド割当済みだが未使用
-
 namespace KK_SceneExplorer
 {
     /// <summary>
     /// 統合シーンブラウザ: 左ペインにフォルダツリー、右ペインにシーン一覧グリッド。
-    /// SceneTree.cs の BF風描画流儀を踏襲。
+    /// 旧ツリー実装の BF風描画流儀を踏襲。
     /// v2.2.0: スクロール式グリッド / ツールチップ位置修正 / フォント連動 / ウィンドウリサイズ＋記憶
     /// </summary>
     public class SceneBrowser : MonoBehaviour
@@ -32,10 +30,7 @@ namespace KK_SceneExplorer
         private const float DeleteResetSeconds = 5f;
         private const float ItemPadX = 3f;   // v3.2.2: サムネ左右マージンを半分（6→3）に縮小
         private const float ItemPadY = 6f;
-        private const float ItemGap = 4f;
         private const float ItemSpacing = 8f;
-        private const float DateSize = 11f;
-        private const float FilenameHeight = 18f;
         private const float ResizeHandleSize = 14f;
         private const float TooltipOffsetX = 16f;
         private const float TooltipOffsetY = 16f;
@@ -52,15 +47,12 @@ namespace KK_SceneExplorer
         private float BottomBarHeight { get { return TextLineHeight + 8f; } }
         private float SliderWidth { get { return Mathf.Max(100f, FontSizeVal * 7f); } }
         private float ButtonHeight { get { return TextLineHeight + 6f; } }
-        private float TabButtonWidth { get { return Mathf.Max(72f, FontSizeVal * 5f); } }
         // v2.5.4: ボタン幅をTextLineHeight基準に変更（旧:固定乗算式）。フッター溢れ対策。
         private float SortButtonWidth { get { return TextLineHeight * 3f; } }
         private float ArrowButtonWidth { get { return TextLineHeight * 1.8f; } }
-        private float PageNavButtonWidth { get { return Mathf.Max(28f, FontSizeVal * 2f); } }
         // v2.5.4: フッターボタン幅をFlexibleWidth化。固定幅プロパティ削除。
         private float FooterButtonWidth { get { return TextLineHeight * 3f; } }
         private float FontSizeVal { get { return (float)SceneExplorerPlugin.FontSize.Value; } }
-        private float RowHeight { get { return Mathf.Max(16f, FontSizeVal + 2f); } }
         // v2.5.2: 日本語フォントの実際の行高（ascender+descender+leading）は
         // fontSize の約1.4倍。クリップ防止のためテキスト行の高さにこの係数を適用。
         private float TextLineHeight { get { return Mathf.Ceil(FontSizeVal * 1.4f); } }
@@ -76,7 +68,6 @@ namespace KK_SceneExplorer
         private static Texture2D _resizeHandleTex;
         private static Texture2D _titleBarTex;
         private static Texture2D _windowBgTex;
-        private static Texture2D _clearTex;
         private static Texture2D _scrollbarTrackTex;
         private static Texture2D _scrollbarThumbTex;
 
@@ -121,7 +112,6 @@ namespace KK_SceneExplorer
         private float _splitPos = 240f;
         private bool _draggingSplitter;
         private float _thumbSize = 96f;
-        private int _hoverItemIndex = -1;
         private string _tooltipText = "";
         private Rect _tooltipRect;
         private SortMode _sortMode = SortMode.Date;
@@ -185,7 +175,6 @@ namespace KK_SceneExplorer
         private GUIStyle _toolbarButtonStyle;
         private GUIStyle _pageLabelStyle;
         private GUIStyle _tooltipStyle;
-        private GUIStyle _splitterStyle;
         private GUIStyle _countLabelStyle;
         private GUIStyle _titleBarStyle;
 
@@ -232,9 +221,9 @@ namespace KK_SceneExplorer
         {
             try
             {
-            // テクスチャ生成（GUI.skinには触らない — SceneTree.csと同じ方式）
-            _selectedRowTex = new Texture2D(1, 1);
+            // テクスチャ生成（GUI.skinには触らない方式。旧ツリー実装と同流儀）
             // v3.0.14: 表示時に ^2.2 変換されるため、設計色の ^(1/2.2) に事前補正（以下同様）
+            _selectedRowTex = new Texture2D(1, 1);
             _selectedRowTex.SetPixel(0, 0, new Color(0.523f, 0.716f, 0.953f, 0.65f));
             _selectedRowTex.Apply();
 
@@ -277,11 +266,6 @@ namespace KK_SceneExplorer
             _windowBgTex = new Texture2D(1, 1);
             _windowBgTex.SetPixel(0, 0, new Color(0.503f, 0.542f, 0.629f, 0.94f));
             _windowBgTex.Apply();
-
-            // v2.6.0: モーダル用透明テクスチャ（クリック吸収レイヤーに使用）
-            _clearTex = new Texture2D(1, 1);
-            _clearTex.SetPixel(0, 0, new Color(0, 0, 0, 0));
-            _clearTex.Apply();
 
             // v3.0.3: スクロールバー用テクスチャ（背景と同化しないよう明るめに）
             _scrollbarTrackTex = new Texture2D(1, 1);
@@ -678,7 +662,6 @@ namespace KK_SceneExplorer
             if (_resizeHandleTex != null) Destroy(_resizeHandleTex);
             if (_titleBarTex != null) Destroy(_titleBarTex);
             if (_windowBgTex != null) Destroy(_windowBgTex);
-            if (_clearTex != null) Destroy(_clearTex);
             if (_scrollbarTrackTex != null) Destroy(_scrollbarTrackTex);
             if (_scrollbarThumbTex != null) Destroy(_scrollbarThumbTex);
             ClearThumbnailCache();
@@ -688,11 +671,6 @@ namespace KK_SceneExplorer
         // ═══════════════════════════════════════════════════════
         // 可視判定
         // ═══════════════════════════════════════════════════════
-
-        private static bool IsLoadSceneVisible()
-        {
-            return SceneExplorerPlugin.activeLoadScene != null;
-        }
 
         // シーン一覧ダイアログ（SceneLoadScene）が存在する間のみ表示
         // v3.1.0: シーンモードは activeLoadScene、キャラ/衣装モードは CurrentBrowserMode で判定
@@ -755,9 +733,6 @@ namespace KK_SceneExplorer
             _tooltipStyle.fontSize = fs;
             _tooltipStyle.padding = new RectOffset(6, 6, 4, 4);
             _tooltipStyle.wordWrap = false;
-
-            _splitterStyle = new GUIStyle();
-            _splitterStyle.normal.background = _splitterTex;
 
             _countLabelStyle = new GUIStyle(skin.label);
             _countLabelStyle.normal.textColor = new Color(0.72f, 0.74f, 0.78f);
@@ -1073,9 +1048,8 @@ namespace KK_SceneExplorer
         private float CountLabelWidth { get { return Mathf.Max(60f, FontSizeVal * 4.5f); } }
 
         // ═══════════════════════════════════════════════════════
-        // ツリーペイン（SceneTree.cs の DrawNode を統合）
+        // ツリーペイン（旧 DrawNode を統合）
         // ═══════════════════════════════════════════════════════
-
         private void DrawTreePanel(Rect panelRect)
         {
             GUILayout.BeginArea(panelRect);

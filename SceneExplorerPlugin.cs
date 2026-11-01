@@ -1062,11 +1062,6 @@ namespace KK_SceneExplorer
 				}
 			}
 
-			internal static bool IsNetworkSaveTarget()
-			{
-				return IsNetworkSaveTarget(SceneExplorerPlugin.lastSceneFolder);
-			}
-
 			internal static bool IsNetworkSaveTarget(string folder)
 			{
 				if (string.IsNullOrEmpty(folder))

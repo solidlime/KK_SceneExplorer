@@ -128,9 +128,6 @@ namespace KK_SceneExplorer
 			return webp;
 		}
 
-		/// <summary>変換待ち枚数（診断用）。</summary>
-		internal static int PendingConvertCount { get { lock (convertLock) return convertQueue.Count; } }
-
 		/// <summary>変換結果と待ち行列を捨てる。</summary>
 		internal static void ClearWebPCache()
 		{
