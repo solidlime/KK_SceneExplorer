@@ -1372,7 +1372,7 @@ namespace KK_SceneExplorer
 					Func<byte[], int, int, byte[]> encoder = BuildWebPEncoder();
 					MeTextureDedupe.SetWebPEncoder(encoder);
 					Log.LogInfo("パッチ適用: ME texture dedupe (TextureSaveHandler / SceneInfo.Save / SceneInfo.Load)"
-						+ (encoder == null ? " / WebP 変換なし（PNG 格納）" : " / WebP ロスレス変換あり（libwebp / 別スレッド）"));
+						+ (encoder == null ? " / WebP 変換なし（PNG 格納）" : " "));
 				}
 				catch (Exception ex)
 				{

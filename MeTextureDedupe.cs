@@ -203,7 +203,7 @@ namespace KK_SceneExplorer
 					if (markerToken == null) continue;
 					// 格納するのは WebP（ロスレス）。ロード時は LoadTexture2DFromBytes が WebP を判別する
 					// hash 衝突時は共有表を汚さず、このテクスチャはインライン（マーカー化しない）で保存する
-					if (!TryRegisterBlob(pendingBlob, hash, ToWebP(hash, data))) continue;
+					if (!TryRegisterBlob(pendingBlob, hash, data)) continue;
 
 					object originalToken = tokenField.GetValue(container);
 					tokenField.SetValue(container, markerToken);
