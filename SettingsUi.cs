@@ -12,12 +12,10 @@ namespace KK_SceneExplorer
 		private Rect windowRect = new Rect(20, 20, 600, 400);
 		private bool visible;
 		private string newScenePath = "";
-		private string newCharaPath = "";
-		private string newCoordinatePath = "";
+
 		private Vector2 scroll;
 		private FolderStatus[] cachedSceneStatuses;
-		private FolderStatus[] cachedCharaStatuses;
-		private FolderStatus[] cachedCoordinateStatuses;
+
 		private bool needRefresh = true;
 
 		private bool wasDown;
@@ -225,7 +223,7 @@ namespace KK_SceneExplorer
 			var titleRect = new Rect(0, 0, fullRect.width, TitleBarHeight);
 			if (Event.current.type == EventType.Repaint)
 			{
-				_titleBarStyle.Draw(titleRect, "☁ フォルダ設定（シーン / キャラ / 衣装）", false, false, false, false);
+				_titleBarStyle.Draw(titleRect, "☁ フォルダ設定（シーン）", false, false, false, false);
 			}
 
 			// ドラッグ領域: タイトルバー全体
@@ -249,22 +247,6 @@ namespace KK_SceneExplorer
 			DrawFolderSection(ref newScenePath, cachedSceneStatuses,
 				new List<string>(SceneExplorerPlugin.ScenePaths.GetConfiguredSceneFolders()),
 				SaveSceneFolders);
-
-			GUILayout.Space(10);
-
-			// ── キャラ ──
-			GUILayout.Label("キャラ（配下の female/male を女/男タブで自動参照）", _sectionHeaderStyle);
-			DrawFolderSection(ref newCharaPath, cachedCharaStatuses,
-				SplitRaw(SceneExplorerPlugin.CharaFolders.Value),
-				SaveCharaFolders);
-
-			GUILayout.Space(10);
-
-			// ── 衣装 ──
-			GUILayout.Label("衣装（直下を参照）", _sectionHeaderStyle);
-			DrawFolderSection(ref newCoordinatePath, cachedCoordinateStatuses,
-				SplitRaw(SceneExplorerPlugin.CoordinateFolders.Value),
-				SaveCoordinateFolders);
 
 			GUILayout.EndScrollView();
 
@@ -326,24 +308,9 @@ namespace KK_SceneExplorer
 			GUILayout.EndHorizontal();
 		}
 
-		/// <summary>セミコロン区切りの設定文字列を一覧に分解する</summary>
-		private static List<string> SplitRaw(string raw)
-		{
-			List<string> result = new List<string>();
-			if (string.IsNullOrEmpty(raw)) return result;
-			foreach (string part in raw.Split(new[] { ';', '\n', '\r' }, System.StringSplitOptions.RemoveEmptyEntries))
-			{
-				string trimmed = part.Trim();
-				if (trimmed.Length > 0) result.Add(trimmed);
-			}
-			return result;
-		}
-
 		private void RefreshStatuses()
 		{
 			cachedSceneStatuses = SceneExplorerPlugin.ScenePaths.GetSceneFolderStatuses();
-			cachedCharaStatuses = SceneExplorerPlugin.ScenePaths.GetFolderStatuses(SceneExplorerPlugin.CharaFolders.Value);
-			cachedCoordinateStatuses = SceneExplorerPlugin.ScenePaths.GetFolderStatuses(SceneExplorerPlugin.CoordinateFolders.Value);
 		}
 
 		private static string FormatStatus(string path, FolderStatus[] statuses, int index)
@@ -368,18 +335,6 @@ namespace KK_SceneExplorer
 		private static void SaveSceneFolders(List<string> folders)
 		{
 			SceneExplorerPlugin.SceneFolders.Value = string.Join(";", folders.ToArray());
-			SceneExplorerPlugin.ConfigFile.Save();
-		}
-
-		private static void SaveCharaFolders(List<string> folders)
-		{
-			SceneExplorerPlugin.CharaFolders.Value = string.Join(";", folders.ToArray());
-			SceneExplorerPlugin.ConfigFile.Save();
-		}
-
-		private static void SaveCoordinateFolders(List<string> folders)
-		{
-			SceneExplorerPlugin.CoordinateFolders.Value = string.Join(";", folders.ToArray());
 			SceneExplorerPlugin.ConfigFile.Save();
 		}
 	}

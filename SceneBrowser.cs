@@ -2,7 +2,6 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Reflection;
 using System.Threading;
 using Manager;
@@ -89,22 +88,10 @@ namespace KK_SceneExplorer
         private float _nextCheckTime;
         private bool _stylesReady;
 
-        // v3.1.0: ブラウザモード遷移検出用（前回フレームのモード。遷移時のみ RescanFiles を1回実行する）
-        private SceneExplorerPlugin.BrowserMode _lastMode = SceneExplorerPlugin.BrowserMode.Scene;
-        // v3.1.0: 衣装モードのリフレクション結果キャッシュ（毎フレームの FindObjectOfType / AccessTools 解決を避ける）
-        private Studio.MPCharCtrl _mpCharCtrl;
-        private UnityEngine.GameObject _costumeRoot;
-        private float _nextCostumeResolveTime;   // ResolveCostumeRoot の再試行間隔（解決失敗時の毎フレーム再試行を防ぐ）
-        // v3.1.0: モード開始時に実際に非アクティブ化したパネルのスナップショット（復元対象。タブ選択状態と矛盾するパネルは復元しない）
-        private readonly List<UnityEngine.GameObject> _hiddenModePanels = new List<UnityEngine.GameObject>();
-
         // ファイル一覧
         private List<SceneItem> _items = new List<SceneItem>();
         private int _selectedIndex = -1;
         private string _lastScannedFolder;
-
-        // v3.4.0: メインゲーム保存モードの新規保存ファイル名（ボトムバーの TextField）
-        private string _mainGameSaveFileName = "";
 
         // UI状態
         private Vector2 _treeScroll;
@@ -184,7 +171,6 @@ namespace KK_SceneExplorer
             Date,
             Size
         }
-
 
         private class SceneItem
         {
@@ -313,7 +299,6 @@ namespace KK_SceneExplorer
         {
             try
             {
-                if (SceneExplorerPlugin.CurrentBrowserMode != SceneExplorerPlugin.BrowserMode.Scene) return;
                 if (SceneExplorerPlugin.CurrentBrowserFolder != null) return;
                 string last = SceneExplorerPlugin.LastFolder.Value;
                 if (string.IsNullOrEmpty(last)) return;
@@ -346,52 +331,6 @@ namespace KK_SceneExplorer
             // v3.3.1: 透明 uGUI ブロックレイヤーをウィンドウ矩形に追従させる。
             // ウィンドウ内の背後 uGUI のみクリックブロック（ウィンドウ外はゲーム操作可能）。
             UpdateBlockLayer();
-
-            // v3.1.0: ブラウザモード遷移の検出と1回限りの初期化
-            // RequestCharaMode / MPCharCtrlOnClickRootPrefix 側で CurrentBrowserMode が切り替わるため、
-            // ここでは遷移時にのみ RescanFiles（ルート読込）と標準パネルの復元を行う。毎フレームの
-            // RescanFiles は行わない（衣装モードで数百ファイルのパースが毎フレーム走る問題の修正）。
-            if (SceneExplorerPlugin.CurrentBrowserMode != _lastMode)
-            {
-                _lastMode = SceneExplorerPlugin.CurrentBrowserMode;
-                if (_lastMode == SceneExplorerPlugin.BrowserMode.Scene)
-                {
-                    // モード解除: 標準パネルを復元
-                    RestoreStandardPanels();
-                }
-                else
-                {
-                    // モード開始: 標準パネルを隠してモードルートを読み直す
-                    HideModePanels();
-                    if (!_visible) _visible = true;
-                    RescanFiles();
-                }
-                // v3.3.2: モード遷移でツリールートが変わるため、フィルタ非空ならマッチ集合を新モードの
-                // ルートで再計算する（refresh ボタンと同列の扱い。旧モードの集合が残ると誤非表示になる）
-                StartFilterScan();
-            }
-
-            // v3.1.0: モード中は標準パネルの再表示を毎フレーム抑止（軽量な維持監視のみ。RescanFiles は呼ばない）
-            bool wantChara = SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.CharaFemale ||
-                             SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.CharaMale;
-            if (wantChara)
-            {
-                foreach (var cl in SceneExplorerPlugin.activeCharaLists)
-                {
-                    if (cl != null && cl.gameObject.activeInHierarchy) cl.gameObject.SetActive(false);
-                }
-            }
-            else if (SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.Coordinate)
-            {
-                // objRoot の非表示は MPCharCtrlOnClickRootPrefix で実施済み。ここはキャッシュ参照の維持確認のみ
-                // （解決失敗時は毎フレーム再試行せず 0.5 秒間隔で再解決）
-                if (_costumeRoot == null && Time.time >= _nextCostumeResolveTime)
-                {
-                    _costumeRoot = ResolveCostumeRoot();
-                    _nextCostumeResolveTime = Time.time + 0.5f;
-                }
-                if (_costumeRoot != null && _costumeRoot.activeInHierarchy) _costumeRoot.SetActive(false);
-            }
 
             if (_loading) return;
             if (Time.time < _nextCheckTime) return;
@@ -673,10 +612,8 @@ namespace KK_SceneExplorer
         // ═══════════════════════════════════════════════════════
 
         // シーン一覧ダイアログ（SceneLoadScene）が存在する間のみ表示
-        // v3.1.0: シーンモードは activeLoadScene、キャラ/衣装モードは CurrentBrowserMode で判定
         private bool ShouldBeVisible()
         {
-            if (SceneExplorerPlugin.CurrentBrowserMode != SceneExplorerPlugin.BrowserMode.Scene) return true;
             return SceneExplorerPlugin.activeLoadScene != null;
         }
 
@@ -781,20 +718,10 @@ namespace KK_SceneExplorer
             var bottomRect = new Rect(0, contentRect.yMax - BottomBarHeight, fullRect.width, BottomBarHeight);
             var bodyRect = new Rect(contentRect.x, contentRect.y, contentRect.width, contentRect.height - BottomBarHeight);
 
-            // v3.1.0: タイトルをモード別表示
-            string windowTitle;
-            switch (SceneExplorerPlugin.CurrentBrowserMode)
-            {
-                case SceneExplorerPlugin.BrowserMode.CharaFemale: windowTitle = "\u30ad\u30e3\u30e9\u30af\u30bf\u30fc\u30d6\u30e9\u30a6\u30b6\uff08\u5973\uff09"; break; // キャラクターブラウザ（女）
-                case SceneExplorerPlugin.BrowserMode.CharaMale:   windowTitle = "\u30ad\u30e3\u30e9\u30af\u30bf\u30fc\u30d6\u30e9\u30a6\u30b6\uff08\u7537\uff09"; break; // キャラクターブラウザ（男）
-                case SceneExplorerPlugin.BrowserMode.Coordinate:  windowTitle = "\u8863\u88c5\u30d6\u30e9\u30a6\u30b6"; break; // 衣装ブラウザ
-                default: windowTitle = "\u30b7\u30fc\u30f3\u30d6\u30e9\u30a6\u30b6"; break; // シーンブラウザ
-            }
-
             // タイトルバー描画
             if (Event.current.type == EventType.Repaint)
             {
-                _titleBarStyle.Draw(titleRect, "\u2601 " + windowTitle, false, false, false, false); // ☁ + モード別タイトル
+                _titleBarStyle.Draw(titleRect, "\u2601 \u30b7\u30fc\u30f3\u30d6\u30e9\u30a6\u30b6", false, false, false, false); // ☁ シーンブラウザ
             }
 
             DrawToolbar(toolbarRect);
@@ -817,9 +744,8 @@ namespace KK_SceneExplorer
             }
 
             // ドラッグ領域: タイトルバー全体
-            GUI.DragWindow(titleRect);
+                GUI.DragWindow(titleRect);
         }
-
 
         // ── ツールバー ──
         private void DrawToolbar(Rect rect)
@@ -923,113 +849,46 @@ namespace KK_SceneExplorer
 
             GUILayout.FlexibleSpace();
 
-            bool charaMode = SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.CharaFemale ||
-                             SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.CharaMale;
-
-            // v3.2.1: キャラモードは [Add][Replace] の明示分離（Add = 常に追加 / Replace = 常に置き換え）
-            if (charaMode)
+            GUI.enabled = _selectedIndex >= 0;
+            if (GUILayout.Button("Load", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
             {
-                // v3.4.0: メインゲームのキャラ保存モード（CharaSave）では標準の保存 UI を隠しているため、
-                // [Add/Replace/Keep Clothes] をファイル名入力 + [Save New] + [Overwrite] に差し替える
-                if (SceneExplorerPlugin.IsMainGameCharaSaveMode)
+                LoadSelected();
+            }
+            GUI.enabled = true;
+
+            GUI.enabled = _selectedIndex >= 0;
+            if (GUILayout.Button("Import", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
+            {
+                ImportSelected();
+            }
+            GUI.enabled = true;
+
+            // デリート（二段階確認）
+            if (_deleteConfirm)
+            {
+                if (Time.time - _deleteConfirmTime > DeleteResetSeconds)
                 {
-                    _mainGameSaveFileName = GUILayout.TextField(_mainGameSaveFileName, GUILayout.MinWidth(FooterButtonWidth * 2f));
-
-                    GUI.enabled = _mainGameSaveFileName.Trim().Length > 0;
-                    if (GUILayout.Button("Save New", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
-                    {
-                        SaveCharaInMainGame(BuildMainGameSavePath(_mainGameSaveFileName), false);
-                    }
-                    GUI.enabled = _selectedIndex >= 0;
-                    if (GUILayout.Button("Overwrite", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
-                    {
-                        if (_selectedIndex >= 0 && _selectedIndex < _items.Count)
-                            SaveCharaInMainGame(_items[_selectedIndex].FilePath, true);
-                    }
-                    GUI.enabled = true;
+                    _deleteConfirm = false;
                 }
-                else
+                GUI.backgroundColor = new Color(0.9f, 0.2f, 0.2f);
+                GUI.enabled = _selectedIndex >= 0;
+                if (GUILayout.Button("Delete?", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
                 {
-                    int sex = (SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.CharaFemale) ? 1 : 0;
-
-                    GUI.enabled = _selectedIndex >= 0;
-                    if (GUILayout.Button("Add", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
-                    {
-                        if (_selectedIndex >= 0 && _selectedIndex < _items.Count)
-                            AddSelected(_items[_selectedIndex].FilePath, sex);
-                    }
-                    GUI.enabled = true;
-
-                    // Replace は選択オブジェクトが無いとき無効化（OCIChar 判定はクリック時。Count のみ毎フレーム判定）
-                    var gom = Singleton<Studio.GuideObjectManager>.Instance;
-                    bool hasSelection = gom != null && gom.selectObjectKey != null && gom.selectObjectKey.Count() > 0;
-                    GUI.enabled = _selectedIndex >= 0 && hasSelection;
-                    if (GUILayout.Button("Replace", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
-                    {
-                        if (_selectedIndex >= 0 && _selectedIndex < _items.Count)
-                            ReplaceSelected(_items[_selectedIndex].FilePath, sex);
-                    }
-                    // v3.2.3: 服を変えずに顔・体型・髪だけ差し替える（標準 ChangeChara は服も変わるため）
-                    if (GUILayout.Button("Keep Clothes", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
-                    {
-                        if (_selectedIndex >= 0 && _selectedIndex < _items.Count)
-                            KeepClothesSelected(_items[_selectedIndex].FilePath, sex);
-                    }
-                    GUI.enabled = true;
+                    DeleteSelected();
+                    _deleteConfirm = false;
                 }
+                GUI.enabled = true;
+                GUI.backgroundColor = Color.white;
             }
             else
             {
-                // v2.5.4: ボタン幅をFlexibleWidth化（ウィンドウ幅に応じて均等スケール）。ラベル英語化。
-                // v3.1.0: 衣装モードでは Load のラベルを「追加」に変更（キャラモードは上記の Add/Replace に置き換え）
-                string loadLabel = SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.Scene
-                    ? "Load"
-                    : "\u8ffd\u52a0"; // 追加
                 GUI.enabled = _selectedIndex >= 0;
-                if (GUILayout.Button(loadLabel, _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
+                if (GUILayout.Button("Delete", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
                 {
-                    LoadSelected();
+                    _deleteConfirm = true;
+                    _deleteConfirmTime = Time.time;
                 }
                 GUI.enabled = true;
-
-                // v3.1.0: Import/Delete はシーンモードのみ表示（キャラ/衣装モードでは対象外の操作）
-                if (SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.Scene)
-                {
-                    GUI.enabled = _selectedIndex >= 0;
-                    if (GUILayout.Button("Import", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
-                    {
-                        ImportSelected();
-                    }
-                    GUI.enabled = true;
-
-                    // デリート（二段階確認）
-                    if (_deleteConfirm)
-                    {
-                        if (Time.time - _deleteConfirmTime > DeleteResetSeconds)
-                        {
-                            _deleteConfirm = false;
-                        }
-                        GUI.backgroundColor = new Color(0.9f, 0.2f, 0.2f);
-                        GUI.enabled = _selectedIndex >= 0;
-                        if (GUILayout.Button("Delete?", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
-                        {
-                            DeleteSelected();
-                            _deleteConfirm = false;
-                        }
-                        GUI.enabled = true;
-                        GUI.backgroundColor = Color.white;
-                    }
-                    else
-                    {
-                        GUI.enabled = _selectedIndex >= 0;
-                        if (GUILayout.Button("Delete", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
-                        {
-                            _deleteConfirm = true;
-                            _deleteConfirmTime = Time.time;
-                        }
-                        GUI.enabled = true;
-                    }
-                }
             }
 
             if (GUILayout.Button("Close", _toolbarButtonStyle, GUILayout.MinWidth(FooterButtonWidth)))
@@ -1084,46 +943,21 @@ namespace KK_SceneExplorer
             // ルート群: ローカルルート + 設定されたネットワークフォルダを同じ深さ(0)で並べて描画
             List<string> roots = new List<string>();
             bool localAdded = false;
-            // v3.2.0: キャラ/衣装モード中はモードルート群をツリールートとして表示する
-            // （シーンルート（studio/scene + 設定フォルダ群）の代わりに、モードルート配下だけを参照させる）
-            if (SceneExplorerPlugin.CurrentBrowserMode != SceneExplorerPlugin.BrowserMode.Scene)
+            string localRoot = UserData.Create("studio/scene");
+            if (!string.IsNullOrEmpty(localRoot) && Directory.Exists(localRoot))
             {
-                string[] modeRoots = SceneExplorerPlugin.GetModeRootFolders();
-                for (int i = 0; i < modeRoots.Length; i++)
+                roots.Add(localRoot);
+                localAdded = true;
+            }
+            string[] configuredRoots = SceneExplorerPlugin.ScenePaths.GetConfiguredSceneFolders();
+            if (configuredRoots != null)
+            {
+                for (int i = 0; i < configuredRoots.Length; i++)
                 {
-                    string root = modeRoots[i];
+                    string root = configuredRoots[i];
                     if (!string.IsNullOrEmpty(root) && Directory.Exists(root))
                     {
                         roots.Add(root);
-                    }
-                }
-                // v3.3.1: 先頭ルートがローカル（UserData 配下）なら「ローカル」ラベルを付与
-                // （シーンモードと同じ「ローカル + 設定フォルダ群」の並びに統一したため）
-                string modeLocal = SceneExplorerPlugin.GetModeLocalRoot();
-                if (roots.Count > 0 && modeLocal != null &&
-                    string.Equals(roots[0], modeLocal, StringComparison.OrdinalIgnoreCase))
-                {
-                    localAdded = true;
-                }
-            }
-            else
-            {
-                string localRoot = UserData.Create("studio/scene");
-                if (!string.IsNullOrEmpty(localRoot) && Directory.Exists(localRoot))
-                {
-                    roots.Add(localRoot);
-                    localAdded = true;
-                }
-                string[] configuredRoots = SceneExplorerPlugin.ScenePaths.GetConfiguredSceneFolders();
-                if (configuredRoots != null)
-                {
-                    for (int i = 0; i < configuredRoots.Length; i++)
-                    {
-                        string root = configuredRoots[i];
-                        if (!string.IsNullOrEmpty(root) && Directory.Exists(root))
-                        {
-                            roots.Add(root);
-                        }
                     }
                 }
             }
@@ -1257,12 +1091,6 @@ namespace KK_SceneExplorer
         // グリッドペイン（右側）— v2.2.0: スクロール式（全件表示）
         // ═══════════════════════════════════════════════════════
 
-        // v3.2.3: サムネイルの縦横比（シーン=16:9 横長、キャラ/衣装=カード PNG 240x320 の 3:4 縦長）
-        private float GetThumbAspect()
-        {
-            return (SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.Scene) ? 9f / 16f : 4f / 3f;
-        }
-
         private void DrawGridPanel(Rect panelRect)
         {
             if (_items.Count == 0)
@@ -1283,7 +1111,7 @@ namespace KK_SceneExplorer
             float cellW = _thumbSize + ItemPadX * 2;
             // v3.2.3: サムネ縦横比はモード別（シーン=16:9 固定、キャラ/衣装=カードの 3:4 に合わせ縦長）
             float thumbW = cellW - ItemPadX * 2f;           // サムネ幅 = セル幅 − 左右余白（= _thumbSize と一致）
-            float thumbH = thumbW * GetThumbAspect();       // モード別アスペクト（シーン 16:9 / キャラ衣装 3:4）
+            float thumbH = thumbW * 9f / 16f;       // シーン 16:9
             float cellH = thumbH + TextLineHeight * 3 + ItemPadY * 2 + 2f;  // テキスト直下の隙間は2px
             int cols = Mathf.Max(1, Mathf.FloorToInt((panelRect.width - 16) / (cellW + ItemSpacing)));
             float gridTotalW = cols * (cellW + ItemSpacing) - ItemSpacing;
@@ -1342,7 +1170,7 @@ namespace KK_SceneExplorer
 
             // サムネイル（v3.2.3: モード別アスペクト。ScaleMode.ScaleToFit のため異比サムネも収まる）
             float thumbW = rect.width - ItemPadX * 2f;      // DrawGridPanel の cellW − ItemPadX*2 と同じ値
-            float thumbH = thumbW * GetThumbAspect();       // シーン 16:9 / キャラ衣装 3:4
+            float thumbH = thumbW * 9f / 16f;       // シーン 16:9
             float thumbX = rect.x + ItemPadX;               // 左右余白は ItemPadX に一致
             float thumbY = rect.y + ItemPadY;
             var thumbRect = new Rect(thumbX, thumbY, thumbW, thumbH);
@@ -1492,20 +1320,6 @@ namespace KK_SceneExplorer
             var item = _items[_selectedIndex];
             try
             {
-                // v3.1.0: モード別ロード（キャラ/衣装モードはブラウザを閉じず連続追加可能）
-                switch (SceneExplorerPlugin.CurrentBrowserMode)
-                {
-                    case SceneExplorerPlugin.BrowserMode.CharaFemale:
-                        AddOrReplaceChara(item.FilePath, 1);   // 1 = 女
-                        return;
-                    case SceneExplorerPlugin.BrowserMode.CharaMale:
-                        AddOrReplaceChara(item.FilePath, 0);   // 0 = 男
-                        return;
-                    case SceneExplorerPlugin.BrowserMode.Coordinate:
-                        ApplyCoordinate(item.FilePath);
-                        return;
-                }
-
                 SceneExplorerPlugin.Log.LogInfo("[SceneBrowser] Loading: " + item.FilePath);
                 StartCoroutine(LoadSceneRoutine(item.FilePath));
             }
@@ -1530,256 +1344,6 @@ namespace KK_SceneExplorer
                 SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] シーン読み込み後のダイアログ破棄に失敗: " + ex.Message);
             }
             _loading = false;
-        }
-
-        // v3.2.0: 選択中の同性別 OCIChar がいれば置き換え、いなければ追加
-        // 標準 CharaList.ChangeCharaFemale/Male と同一方式（obj\CharaList_decompiled.cs:123-135）。
-        // GuideObjectManager が未初期化等の場合は従来の追加にフォールバックする。
-        private void AddOrReplaceChara(string path, int sex)
-        {
-            // v3.4.0: メインゲーム（Koikatu）ではスタジオ API（OCIChar / Studio.Instance）が使えないため、
-            // キャラエディタの標準ロード経路（LoadFileLimited + Reload）で直接読み込む
-            if (SceneExplorerPlugin.IsMainGame)
-            {
-                // v3.4.0: メインゲームのキャラ保存モードではダブルクリック = 選択カードへ上書き保存
-                if (SceneExplorerPlugin.IsMainGameCharaSaveMode)
-                {
-                    SaveCharaInMainGame(path, true);
-                    return;
-                }
-                LoadCharaInMainGame(path, sex);
-                return;
-            }
-            Studio.OCIChar[] targets = CollectSameSexChara(sex);
-
-            if (targets != null && targets.Length > 0)
-            {
-                for (int i = 0; i < targets.Length; i++)
-                {
-                    try { targets[i].ChangeChara(path); }
-                    catch (Exception ex) { SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] キャラ置き換え失敗: " + path + " - " + ex.Message); }
-                }
-                SceneExplorerPlugin.Log.LogInfo("[SceneBrowser] キャラ置き換え: " + path + " x" + targets.Length);
-            }
-            else if (sex == 1)
-            {
-                try { Studio.Studio.Instance.AddFemale(path); }
-                catch (Exception ex) { SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] キャラ追加失敗: " + path + " - " + ex.Message); }
-            }
-            else
-            {
-                try { Studio.Studio.Instance.AddMale(path); }
-                catch (Exception ex) { SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] キャラ追加失敗: " + path + " - " + ex.Message); }
-            }
-        }
-
-        // v3.4.0: メインゲームのキャラロード（キャラエディタの標準経路を直接実行）
-        // sex はスタジオ慣例（1=女 / 0=男）で受け取り、LoadFileLimited の Byte sex（0=女 / 1=男）へ変換する
-        private void LoadCharaInMainGame(string path, int sex)
-        {
-            try
-            {
-                ChaCustom.CustomBase customBase = FindObjectOfType<ChaCustom.CustomBase>();
-                if (customBase == null)
-                {
-                    SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] メインゲームキャラロード失敗: CustomBase が見つかりません: " + path);
-                    return;
-                }
-                ChaControl chaCtrl = customBase.chaCtrl;
-                if (chaCtrl == null)
-                {
-                    SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] メインゲームキャラロード失敗: chaCtrl が null です: " + path);
-                    return;
-                }
-                // 顔・体型・髪・パラメータ・衣装をすべてカードから読み込む
-                bool ok = chaCtrl.chaFile.LoadFileLimited(path, (byte)(1 - sex), true, true, true, true, true);
-                if (!ok)
-                {
-                    SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] メインゲームキャラロード失敗（LoadFileLimited が false）: " + path);
-                    return;
-                }
-                chaCtrl.Reload(false, false, false, false);
-                SceneExplorerPlugin.Log.LogInfo("[SceneBrowser] メインゲームキャラロード: " + path);
-            }
-            catch (Exception ex)
-            {
-                SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] メインゲームキャラロード失敗: " + path + " - " + ex.Message);
-            }
-        }
-
-        // v3.4.0: メインゲームのキャラ保存（キャラエディタの標準経路を直接実行）
-        // overwrite=true なら選択カードへ上書き、false なら指定パスに新規保存。
-        // ゲーム本体と同一の引数（sex=(byte)-1 / newFile=false）で SaveCharaFile を呼ぶ
-        // （CustomControl.<Start>m__8 の IL デコードで確認: 新規/上書きとも同一引数）。
-        private void SaveCharaInMainGame(string path, bool overwrite)
-        {
-            if (string.IsNullOrEmpty(path)) return;
-            try
-            {
-                ChaCustom.CustomBase customBase = FindObjectOfType<ChaCustom.CustomBase>();
-                if (customBase == null)
-                {
-                    SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] メインゲームキャラ保存失敗: CustomBase が見つかりません: " + path);
-                    return;
-                }
-                ChaControl chaCtrl = customBase.chaCtrl;
-                if (chaCtrl == null)
-                {
-                    SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] メインゲームキャラ保存失敗: chaCtrl が null です: " + path);
-                    return;
-                }
-                bool ok = chaCtrl.chaFile.SaveCharaFile(path, unchecked((byte)-1), false);
-                if (!ok)
-                {
-                    SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] メインゲームキャラ保存失敗（SaveCharaFile が false）: " + path);
-                    return;
-                }
-                SceneExplorerPlugin.Log.LogInfo("[SceneBrowser] メインゲームキャラ保存: " + path + (overwrite ? " (overwrite)" : ""));
-                // 保存したカードを一覧に反映
-                RescanFiles();
-            }
-            catch (Exception ex)
-            {
-                SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] メインゲームキャラ保存失敗: " + path + " - " + ex.Message);
-            }
-        }
-
-        // v3.4.0: 新規保存用のフルパスを組み立てる（現在のブラウザフォルダ + ファイル名、.png 拡張子を補完）
-        private string BuildMainGameSavePath(string fileName)
-        {
-            fileName = fileName.Trim();
-            if (fileName.Length == 0) return null;
-            if (!fileName.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
-                fileName += ".png";
-            string folder = SceneExplorerPlugin.CurrentBrowserFolder;
-            if (string.IsNullOrEmpty(folder))
-            {
-                string[] roots = SceneExplorerPlugin.GetModeRootFolders();
-                folder = (roots.Length > 0) ? roots[0] : "";
-            }
-            if (string.IsNullOrEmpty(folder)) return null;
-            return Path.Combine(folder, fileName);
-        }
-
-        // v3.2.1: 選択中の同性別 OCIChar を収集する（標準 CharaList と同一方式。失敗時は null）
-        private Studio.OCIChar[] CollectSameSexChara(int sex)
-        {
-            try
-            {
-                var gom = Singleton<Studio.GuideObjectManager>.Instance;
-                if (gom == null || gom.selectObjectKey == null) return null;
-                return (from v in gom.selectObjectKey
-                        select Studio.Studio.GetCtrlInfo(v) as Studio.OCIChar into v
-                        where v != null
-                        where v.oiCharInfo.sex == sex
-                        select v).ToArray();
-            }
-            catch (Exception ex)
-            {
-                SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] 選択キャラ収集に失敗: " + ex.Message);
-                return null;
-            }
-        }
-
-        // v3.2.1: 常に追加（ボトムバーの Add ボタン用）
-        private void AddSelected(string path, int sex)
-        {
-            try
-            {
-                if (sex == 1)
-                    Studio.Studio.Instance.AddFemale(path);
-                else
-                    Studio.Studio.Instance.AddMale(path);
-                SceneExplorerPlugin.Log.LogInfo("[SceneBrowser] キャラ追加: " + path);
-            }
-            catch (Exception ex)
-            {
-                SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] キャラ追加失敗: " + path + " - " + ex.Message);
-            }
-        }
-
-        // v3.2.1: 常に置き換え（ボトムバーの Replace ボタン用。同性別キャラ未選択なら警告のみ）
-        private void ReplaceSelected(string path, int sex)
-        {
-            Studio.OCIChar[] targets = CollectSameSexChara(sex);
-            if (targets == null || targets.Length == 0)
-            {
-                SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] Replace: シーン内で同性別キャラクターを選択してください");
-                return;
-            }
-            for (int i = 0; i < targets.Length; i++)
-            {
-                try { targets[i].ChangeChara(path); }
-                catch (Exception ex) { SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] キャラ置き換え失敗: " + path + " - " + ex.Message); }
-            }
-            SceneExplorerPlugin.Log.LogInfo("[SceneBrowser] キャラ置き換え: " + path + " x" + targets.Length);
-        }
-
-        // v3.2.3: 服を変えずに読み込み（顔・体型・髪のみ差し替え。Keep Clothes ボタン用）
-        private void KeepClothesSelected(string path, int sex)
-        {
-            Studio.OCIChar[] targets = CollectSameSexChara(sex);
-            if (targets == null || targets.Length == 0)
-            {
-                SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] KeepClothes: シーン内で同性別キャラクターを選択してください");
-                return;
-            }
-            for (int i = 0; i < targets.Length; i++)
-            {
-                try { ApplyKeepClothes(targets[i], path); }
-                catch (Exception ex) { SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] 服維持読込失敗: " + path + " - " + ex.Message); }
-            }
-            SceneExplorerPlugin.Log.LogInfo("[SceneBrowser] 服を変えずに読込: " + path + " x" + targets.Length);
-        }
-
-        // v3.2.3: 標準 ChangeChara の骨組みで、Reload だけ服維持（noChangeClothes:true）にする
-        private void ApplyKeepClothes(Studio.OCIChar ociChar, string path)
-        {
-            // 髪ボーンを除去（ChangeChara と同一手順）
-            foreach (var bone in ociChar.listBones.Where(v => v.boneGroup == Studio.OIBoneInfo.BoneGroup.Hair).ToList())
-            {
-                Singleton<Studio.GuideObjectManager>.Instance.Delete(bone.guideObject);
-            }
-            ociChar.listBones = ociChar.listBones.Where(v => v.boneGroup != Studio.OIBoneInfo.BoneGroup.Hair).ToList();
-            var hairKeys = ociChar.oiCharInfo.bones.Where(b => b.Value.group == Studio.OIBoneInfo.BoneGroup.Hair).Select(b => b.Key).ToArray();
-            for (int i = 0; i < hairKeys.Length; i++) ociChar.oiCharInfo.bones.Remove(hairKeys[i]);
-            ociChar.hairDynamic = null;
-            ociChar.skirtDynamic = null;
-
-            var charInfo = ociChar.charInfo;
-            charInfo.chaFile.LoadCharaFile(path, byte.MaxValue, noLoadPng: true);
-            charInfo.ChangeCoordinateType((ChaFileDefine.CoordinateType)charInfo.fileStatus.coordinateType);
-            // 服だけ維持して顔・髪・体型を新カードで再構築（ChangeChara の Reload() フル版と対）
-            charInfo.Reload(noChangeClothes: true, noChangeHead: false, noChangeHair: false, noChangeBody: false);
-            ociChar.treeNodeObject.textName = charInfo.chaFile.parameter.fullname;
-
-            try { Studio.AddObjectAssist.InitHairBone(ociChar, Singleton<Studio.Info>.Instance.dicBoneInfo); }
-            catch { /* 髪ボーン初期化失敗は無視（ChangeChara も同様の耐障害性） */ }
-            try { ociChar.hairDynamic = Studio.AddObjectFemale.GetHairDynamic(charInfo.objHair); }
-            catch { }
-            try { ociChar.skirtDynamic = Studio.AddObjectFemale.GetSkirtDynamic(charInfo.objClothes); }
-            catch { }
-        }
-
-        // v3.1.0: 選択中キャラに衣装を適用（未選択なら何もしない）
-        private void ApplyCoordinate(string path)
-        {
-            var targets = Studio.Studio.GetSelectObjectCtrl();
-            if (targets == null)
-            {
-                SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] スタジオインスタンス未初期化のため衣装適用を中止: " + path);
-                return;
-            }
-            foreach (var obj in targets)
-            {
-                if (obj is Studio.OCIChar oci)
-                {
-                    SceneExplorerPlugin.Log.LogInfo("[SceneBrowser] 衣装適用: " + path + " -> " + oci.treeNodeObject.name);
-                    oci.LoadClothesFile(path);
-                    return;
-                }
-            }
-            SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] 衣装適用対象のキャラが選択されていません: " + path);
         }
 
         private void ImportSelected()
@@ -1817,29 +1381,6 @@ namespace KK_SceneExplorer
 
         private void CloseScene()
         {
-            // v3.1.0: キャラ/衣装モード中はダイアログシーンが無いため UnLoad せず、モード解除と標準パネルの復元のみ行う
-            if (SceneExplorerPlugin.CurrentBrowserMode != SceneExplorerPlugin.BrowserMode.Scene)
-            {
-                // v3.4.0: メインゲームでは標準の閉じる処理（btnClose.onClick.Invoke → ウィンドウ全体非表示）を実行する。
-                // ポーリング側（DetectMainGameCharaLoad / DetectMainGameCharaSave）の終了検知で標準パネル復元・モード解除が完了する
-                if (SceneExplorerPlugin.IsMainGame)
-                {
-                    if (SceneExplorerPlugin.IsMainGameCharaSaveMode)
-                    {
-                        SceneExplorerPlugin.CloseMainGameCharaSave();
-                    }
-                    else
-                    {
-                        SceneExplorerPlugin.CloseMainGameCharaLoad();
-                    }
-                }
-                SceneExplorerPlugin.RequestSceneMode("Close");
-                _visible = false;
-                _selectedIndex = -1;
-                _tooltipText = "";
-                RestoreStandardPanels();
-                return;
-            }
             try
             {
                 Singleton<Manager.Scene>.Instance.UnLoad();
@@ -1849,81 +1390,6 @@ namespace KK_SceneExplorer
                 SceneExplorerPlugin.Log.LogError("[SceneBrowser] Close failed: " + ex.Message);
             }
         }
-
-        // v3.1.0: キャラ/衣装モード開始時に標準パネルを非表示にする（遷移検出時のみ呼ぶ）
-        // 実際に非アクティブ化したパネルのみ _hiddenModePanels に記録し、モード解除時の復元対象とする。
-        // モードが切り替わった場合（女→男等）は前モードのスナップショットを破棄して新たに記録する
-        // （前モードのパネルはタブ切替により元々非アクティブ化されるため復元対象から外す）。
-        private void HideModePanels()
-        {
-            _hiddenModePanels.Clear();
-            foreach (var cl in SceneExplorerPlugin.activeCharaLists)
-            {
-                if (cl != null && cl.gameObject.activeInHierarchy)
-                {
-                    cl.gameObject.SetActive(false);
-                    _hiddenModePanels.Add(cl.gameObject);
-                }
-            }
-            if (_costumeRoot == null) _costumeRoot = ResolveCostumeRoot();
-            if (_costumeRoot != null && _costumeRoot.activeInHierarchy)
-            {
-                _costumeRoot.SetActive(false);
-                _hiddenModePanels.Add(_costumeRoot);
-            }
-        }
-
-        // v3.1.0: モード解除時に標準パネルを復元する（遷移検出時のみ呼ぶ）
-        // スナップショット（このモードで実際に隠したパネル）のみ復元し、元々非アクティブだった
-        // パネルには触れない（タブ選択状態を尊重）。モード開始時にアクティブだったパネルが
-        // タブ切替で非アクティブ化された場合も復元しない。
-        private void RestoreStandardPanels()
-        {
-            // 破棄済み CharaList 参照を除去（スタジオシーン再ロード対策。Unity の == null オーバーロードで判定）
-            SceneExplorerPlugin.activeCharaLists.RemoveAll(l => l == null);
-            foreach (var go in _hiddenModePanels)
-            {
-                if (go != null && !go.activeInHierarchy) go.SetActive(true);
-            }
-            _hiddenModePanels.Clear();
-            // v3.1.0: Close 後 select==4 残留による誤再発火防止。
-            // 別キャラ選択時（ociChar setter → UpdateInfo → OnClickRoot(4)）に衣装モードが勝手に開くのを防ぐため、
-            // モード解除時に MPCharCtrl.select を -1 にリセットする（タブ表示は次の OnClickRoot で同期される）。
-            if (_mpCharCtrl != null)
-            {
-                var selectField = HarmonyLib.AccessTools.Field(typeof(Studio.MPCharCtrl), "select");
-                if (selectField != null) selectField.SetValue(_mpCharCtrl, -1);
-            }
-            _mpCharCtrl = null;   // 次回モード開始時に再解決させる
-            _costumeRoot = null;
-        }
-
-        // v3.1.0: costumeInfo フィールド（private）のルート GameObject を解決する（リフレクション結果はキャッシュ）
-        private UnityEngine.GameObject ResolveCostumeRoot()
-        {
-            if (_mpCharCtrl == null)
-                _mpCharCtrl = UnityEngine.Object.FindObjectOfType<Studio.MPCharCtrl>();
-            if (_mpCharCtrl == null) return null;
-            try
-            {
-                var fi = HarmonyLib.AccessTools.Field(typeof(Studio.MPCharCtrl), "costumeInfo");
-                if (fi == null) return null;
-                var ci = fi.GetValue(_mpCharCtrl);
-                if (ci == null) return null;
-                var rootFi = HarmonyLib.AccessTools.Field(ci.GetType(), "objRoot") ?? HarmonyLib.AccessTools.Field(ci.GetType(), "root");
-                if (rootFi == null) return null;
-                return rootFi.GetValue(ci) as UnityEngine.GameObject;
-            }
-            catch (Exception ex)
-            {
-                SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] costumeInfo ルート解決失敗: " + ex.Message);
-                return null;
-            }
-        }
-
-		// ═══════════════════════════════════════════════════════
-		// データ取得・ソート
-		// ═══════════════════════════════════════════════════════
 
         private void CheckFolderChanged()
         {
@@ -1952,21 +1418,7 @@ namespace KK_SceneExplorer
             string basePath = _lastScannedFolder;
             if (string.IsNullOrEmpty(basePath))
             {
-                // v3.2.0: モード中に CurrentBrowserFolder が null（モードルートが空 = 設定ミス）なら、
-                // シーンルート（GetBrowserBasePath）をフォールバック走査してキャラカードを無駄パースしないよう空一覧で終了。
-                // 判定はモード中かどうか（ルートが空でもモード中ならフォールバックしない）
-                if (SceneExplorerPlugin.CurrentBrowserMode != SceneExplorerPlugin.BrowserMode.Scene)
-                {
-                    SceneExplorerPlugin.Log.LogWarning("[SceneBrowser] モードルートが空のため一覧を空にします（フォルダ設定を確認してください）");
-                    return;
-                }
                 basePath = SceneExplorerPlugin.GetBrowserBasePath();
-            }
-            // v3.2.0: モードルートが存在する場合、相対パス（例: "chara/female"）をフルパスへ解決
-            // （GetModeRootFolders は Directory.Exists 済みフルパスを返すため、通常は IsPathRooted が true でスキップされる）
-            if (SceneExplorerPlugin.GetModeRootFolders().Length > 0 && !Path.IsPathRooted(basePath))
-            {
-                basePath = Path.Combine(UserData.Path, basePath);
             }
             if (string.IsNullOrEmpty(basePath) || !Directory.Exists(basePath)) return;
 
@@ -2351,35 +1803,11 @@ namespace KK_SceneExplorer
 
         private void SelectFolder(string path)
         {
-            // v3.2.0: キャラ/衣装モードではモードルート群より上へ移動させない（複数ルート対応）
-            if (SceneExplorerPlugin.CurrentBrowserMode != SceneExplorerPlugin.BrowserMode.Scene)
-            {
-                string[] modeRoots = SceneExplorerPlugin.GetModeRootFolders();
-                bool insideAnyRoot = false;
-                for (int i = 0; i < modeRoots.Length; i++)
-                {
-                    // GetModeRootFolders は Directory.Exists 確認済みのフルパスを返す（ResolveFolderSetting 済み）
-                    // プレフィックス誤判定（"C:\chara\female" と "C:\chara\female2"）を防ぐため等値 or セパレータ付き前方一致で判定
-                    if (path.Equals(modeRoots[i], StringComparison.OrdinalIgnoreCase) ||
-                        path.StartsWith(modeRoots[i] + "\\", StringComparison.OrdinalIgnoreCase))
-                    {
-                        insideAnyRoot = true;
-                        break;
-                    }
-                }
-                if (!insideAnyRoot && modeRoots.Length > 0)
-                    path = modeRoots[0];   // いずれのルート配下でもなければ先頭ルートへ矯正
-            }
-
             // プラグイン側のフィールドを更新（別タスクで実装）
             SceneExplorerPlugin.CurrentBrowserFolder = path;
-            // v3.2.1: シーンモードでのみ最後に開いたフォルダを記憶（モードルートをシーンの記憶と混ぜない）
             // v3.3.1: バックスラッシュはエスケープせずそのまま保存（読込時に BepInEx がデコード、正規化で補正）
-            if (SceneExplorerPlugin.CurrentBrowserMode == SceneExplorerPlugin.BrowserMode.Scene)
-            {
-                SceneExplorerPlugin.LastFolder.Value = path;
-                SceneExplorerPlugin.ConfigFile.Save();
-            }
+            SceneExplorerPlugin.LastFolder.Value = path;
+            SceneExplorerPlugin.ConfigFile.Save();
             RescanFiles();
         }
 
@@ -2469,7 +1897,7 @@ namespace KK_SceneExplorer
                 }
                 return;
             }
-            // ルート群はメインスレッドで確定させてからスレッドに渡す（GetModeRootFolders 等はスレッド非安全のため）
+            // ルート群はメインスレッドで確定させてからスレッドに渡す（UserData.Create 等はスレッド非安全のため）
             List<string> roots = GetTreeRoots();
             int gen;
             lock (_filterScanLock)
@@ -2530,35 +1958,20 @@ namespace KK_SceneExplorer
         private List<string> GetTreeRoots()
         {
             List<string> roots = new List<string>();
-            if (SceneExplorerPlugin.CurrentBrowserMode != SceneExplorerPlugin.BrowserMode.Scene)
+            string localRoot = UserData.Create("studio/scene");
+            if (!string.IsNullOrEmpty(localRoot) && Directory.Exists(localRoot))
             {
-                string[] modeRoots = SceneExplorerPlugin.GetModeRootFolders();
-                for (int i = 0; i < modeRoots.Length; i++)
+                roots.Add(localRoot);
+            }
+            string[] configuredRoots = SceneExplorerPlugin.ScenePaths.GetConfiguredSceneFolders();
+            if (configuredRoots != null)
+            {
+                for (int i = 0; i < configuredRoots.Length; i++)
                 {
-                    string root = modeRoots[i];
+                    string root = configuredRoots[i];
                     if (!string.IsNullOrEmpty(root) && Directory.Exists(root))
                     {
                         roots.Add(root);
-                    }
-                }
-            }
-            else
-            {
-                string localRoot = UserData.Create("studio/scene");
-                if (!string.IsNullOrEmpty(localRoot) && Directory.Exists(localRoot))
-                {
-                    roots.Add(localRoot);
-                }
-                string[] configuredRoots = SceneExplorerPlugin.ScenePaths.GetConfiguredSceneFolders();
-                if (configuredRoots != null)
-                {
-                    for (int i = 0; i < configuredRoots.Length; i++)
-                    {
-                        string root = configuredRoots[i];
-                        if (!string.IsNullOrEmpty(root) && Directory.Exists(root))
-                        {
-                            roots.Add(root);
-                        }
                     }
                 }
             }
